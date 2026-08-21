@@ -54,7 +54,7 @@ pnpm assets:check
 
 ## 发布检查
 
-1. 更新版本与用户可见变更。
+1. 更新版本、安装示例与 `CHANGELOG.md`。
 2. 运行 `pnpm verify:release`。
 3. 运行 `pnpm test:dsh:real` 并确认项目摘要未改变、凭据未出现在日志中。
 4. 运行 `DEEPSEEK_API_KEY=... pnpm demo`，通过真实 DeepSeek 会话一次性重新生成并检查两张 README 演示图。

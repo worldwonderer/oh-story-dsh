@@ -171,11 +171,13 @@ function useWorkspace(sessionId: string): {
   const [workspace, setWorkspace] = useState<WorkspacePayload>();
   const [error, setError] = useState<string>();
   const [loading, setLoading] = useState(true);
-  const reload = useCallback(() => { setVersion((value) => value + 1); }, []);
+  const reload = useCallback(() => {
+    setLoading(true);
+    setVersion((value) => value + 1);
+  }, []);
   useEffect(() => {
     const controller = new AbortController();
     setError(undefined);
-    setLoading(true);
     void fetch(endpoint("workspace", sessionId), { signal: controller.signal })
       .then((response) => json<WorkspacePayload>(response))
       .then(setWorkspace)

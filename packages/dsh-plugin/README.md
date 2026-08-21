@@ -18,14 +18,14 @@
 ## 安装
 
 ```bash
-npx -y @deepseek-ai/dsh@0.1.1-rc.1 plugin --profile web add @oh-story/dsh@0.1.0
+npx -y @deepseek-ai/dsh@0.1.1-rc.1 plugin --profile web add @oh-story/dsh@0.1.1
 npx -y @deepseek-ai/dsh@0.1.1-rc.1 web
 ```
 
 也可以直接安装 GitHub Release 中的预构建包：
 
 ```bash
-npx -y @deepseek-ai/dsh@0.1.1-rc.1 plugin --profile web add https://github.com/worldwonderer/oh-story-dsh/releases/download/v0.1.0/oh-story-dsh-0.1.0.tgz
+npx -y @deepseek-ai/dsh@0.1.1-rc.1 plugin --profile web add https://github.com/worldwonderer/oh-story-dsh/releases/download/v0.1.1/oh-story-dsh-0.1.1.tgz
 npx -y @deepseek-ai/dsh@0.1.1-rc.1 web
 ```
 
@@ -35,4 +35,4 @@ npx -y @deepseek-ai/dsh@0.1.1-rc.1 web
 
 ## License
 
-[MIT](LICENSE)
+[Changelog](https://github.com/worldwonderer/oh-story-dsh/blob/main/CHANGELOG.md) · [MIT](LICENSE)

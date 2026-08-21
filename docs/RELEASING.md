@@ -21,11 +21,11 @@ removed.
 
 ## Cut a release
 
-1. Update `packages/dsh-plugin/package.json` and both installation examples to
-   the intended version.
+1. Update the root and package versions, installation examples, and
+   `CHANGELOG.md` for the intended release.
 2. Run `pnpm verify:release` locally.
 3. Commit and push `main`.
-4. Create and push the matching tag, for example `v0.1.0`.
+4. Create and push the matching `v<package-version>` tag.
 
 The release workflow then:
 
@@ -43,12 +43,13 @@ safely re-run.
 Do not announce a release until the registry reports the exact version:
 
 ```bash
-npm view @oh-story/dsh@0.1.0 version dist.integrity
-npx -y @deepseek-ai/dsh@0.1.1-rc.1 plugin --profile web add @oh-story/dsh@0.1.0
+VERSION=0.1.1
+npm view "@oh-story/dsh@$VERSION" version dist.integrity
+npx -y @deepseek-ai/dsh@0.1.1-rc.1 plugin --profile web add "@oh-story/dsh@$VERSION"
 ```
 
 The GitHub Release tarball remains a registry-independent installation path:
 
 ```bash
-npx -y @deepseek-ai/dsh@0.1.1-rc.1 plugin --profile web add https://github.com/worldwonderer/oh-story-dsh/releases/download/v0.1.0/oh-story-dsh-0.1.0.tgz
+npx -y @deepseek-ai/dsh@0.1.1-rc.1 plugin --profile web add "https://github.com/worldwonderer/oh-story-dsh/releases/download/v$VERSION/oh-story-dsh-$VERSION.tgz"
 ```
