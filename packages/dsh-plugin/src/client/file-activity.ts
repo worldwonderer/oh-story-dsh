@@ -1,5 +1,10 @@
-import type { RunningToolCall, ToolCallBlock } from "@deepseek-ai/dsh-client-runtime/client";
-import type { ProjectedFileCall } from "../file-activity-projection-types.js";
+import type {
+  ConversationTimelineSnapshot,
+  PartialAssistant,
+  RunningToolCall,
+  ToolCallBlock
+} from "@deepseek-ai/dsh-client-runtime/client";
+import type { AssistantChatData } from "@deepseek-ai/dsh-client-ui-conversation/client";
 
 export type MutationToolName = "write" | "edit" | "str_replace_editor";
 
@@ -26,6 +31,19 @@ const STORY_DIRECTORIES = new Set(["正文", "大纲", "设定", "追踪", "对�
 const DRAMA_DIRECTORIES = new Set(["输入", "项目开发", "设定集", "剧集", "交付", "创作者决策", "审查"]);
 const EDITABLE_EXTENSION = /\.(?:md|txt|json|jsonl)$/iu;
 const MUTATING_CALLS = new Set(["write", "edit", "str_replace_editor", "bash", "run_code", "oh_story_role"]);
+
+/** Read the latest running Assistant step, including tool-only steps hidden from the Chat list. */
+export function streamingAssistant(timeline: ConversationTimelineSnapshot): PartialAssistant | null {
+  for (const turnNumber of timeline.turnOrder.toReversed()) {
+    const turn = timeline.turns.get(turnNumber);
+    if (turn === undefined) continue;
+    for (const step of turn.steps.toReversed()) {
+      const assistant: AssistantChatData | undefined = step.data.get("assistant-step");
+      if (assistant?.status === "running") return assistant;
+    }
+  }
+  return null;
+}
 
 function decodeEscape(character: string): string | undefined {
   switch (character) {
@@ -160,12 +178,13 @@ function visitRunning(blocks: readonly ToolCallBlock[], visit: (call: RunningToo
 /** Return every active file mutation in official DSH dispatch order, including nested Code Mode calls. */
 export function fileMutations(
   runningCalls: readonly RunningToolCall[],
-  projectedCalls: readonly ProjectedFileCall[] = []
+  partial: PartialAssistant | null = null
 ): FileMutationActivity[] {
   const values: FileMutationActivity[] = [];
   visitRunning(runningCalls, (call) => { values.push(...mutationsFromRunning(call)); });
-  for (const call of projectedCalls) {
-    const value = mutationFromArgs(call.name, call.callId, call.argsRaw, "streaming");
+  for (const block of partial?.blocks ?? []) {
+    if (block.kind !== "tool-call") continue;
+    const value = mutationFromArgs(block.name, block.callId, block.argsRaw, "streaming");
     if (value !== undefined && !values.some((candidate) => candidate.callId === value.callId)) values.push(value);
   }
   return values;

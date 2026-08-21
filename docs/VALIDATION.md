@@ -23,7 +23,7 @@ The paid real-provider layer is intentionally excluded from Pull Request CI. It 
 | Plugin boundary | Host bundle and source audit keep all DSH imports inside `@oh-story/dsh` |
 | Workspace safety | Tests cover same-origin/Host trust, canonical paths, traversal, absolute paths and symbolic-link escape |
 | Editor concurrency | Versioned GET/PUT rejects stale saves; Chrome edits, saves, rereads and restores a real workspace file |
-| File following | Tests cover partial tool JSON, streamed write/edit projection, creative path classification and workbench switching |
+| File following | Tests cover DSH Step location data, nested running calls, streamed write/edit previews, creative path classification and workbench switching |
 | Markdown rendering | Component tests cover tables, task lists, fenced code, inline formatting, safe links and inert raw HTML |
 | JSONL rendering | Component tests cover typed record summaries, source line numbers, scalar records and per-line parse failures |
 | Three-column layout | Native DSH Chrome smoke checks ordered tree/editor/Chat geometry and minimum usable widths |
@@ -32,7 +32,7 @@ The paid real-provider layer is intentionally excluded from Pull Request CI. It 
 | Roles and hooks | Tests cover Role catalog, DSH child-Agent invocation and novel mutation guards |
 | Package contents | Build and pack include both pinned knowledge sets, package metadata and license while omitting source tests and the standalone Drama Dashboard |
 
-Current deterministic result: 10 test files and 33 tests passing.
+Current deterministic result: 9 test files and 33 tests passing.
 
 ## Native DSH Web audit
 

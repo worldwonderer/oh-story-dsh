@@ -1,4 +1,4 @@
-import type { RunningToolCall } from "@deepseek-ai/dsh-client-runtime/client";
+import type { ConversationTimelineSnapshot, RunningToolCall } from "@deepseek-ai/dsh-client-runtime/client";
 import { describe, expect, it } from "vitest";
 import {
   creativeRelativePath,
@@ -6,10 +6,41 @@ import {
   jsonStringPrefix,
   mutatingCallIds,
   previewMutation,
+  streamingAssistant,
   workbenchModeForPath
 } from "../src/client/file-activity.js";
 
-describe("official DSH file activity projection", () => {
+describe("official DSH file activity", () => {
+  it("reads a tool-only Assistant from official Step location data", () => {
+    const assistant = {
+      status: "running" as const,
+      turn: 2,
+      step: 1,
+      time: 1,
+      blocks: [{ kind: "tool-call" as const, callId: "write-hidden", name: "write", argsRaw: "{}" }]
+    };
+    const timeline = {
+      turnOrder: [2],
+      turns: new Map([[2, {
+        turn: 2,
+        status: "open",
+        start: undefined,
+        end: undefined,
+        data: { get: () => undefined },
+        steps: [{
+          turn: 2,
+          step: 1,
+          status: "open",
+          start: undefined,
+          end: undefined,
+          data: { get: () => assistant }
+        }]
+      }]])
+    } as unknown as ConversationTimelineSnapshot;
+
+    expect(streamingAssistant(timeline)).toBe(assistant);
+  });
+
   it("decodes a still-streaming JSON string prefix", () => {
     expect(jsonStringPrefix('{"file_path":"正文/第011章.md","content":"雨声\\n越来', "content"))
       .toEqual({ value: "雨声\n越来", complete: false });
@@ -18,12 +49,16 @@ describe("official DSH file activity projection", () => {
   });
 
   it("projects a streaming write call before tool execution starts", () => {
-    const activity = fileMutations([], [{
-      slot: "1:1:0",
-      callId: "write-1",
-      name: "write",
-      argsRaw: '{"file_path":"正文/第011章.md","content":"第一行\\n第二'
-    }]).at(-1);
+    const activity = fileMutations([], {
+      turn: 1,
+      step: 1,
+      blocks: [{
+        kind: "tool-call",
+        callId: "write-1",
+        name: "write",
+        argsRaw: '{"file_path":"正文/第011章.md","content":"第一行\\n第二'
+      }]
+    }).at(-1);
     expect(activity).toMatchObject({
       callId: "write-1",
       stage: "streaming",

@@ -254,6 +254,8 @@ async function selectSession(page: Page, workspaceTitle: string, sessionTitle: s
   const sessionRow = page.getByRole("treeitem").filter({ hasText: sessionTitle }).first();
   await sessionRow.waitFor({ state: "visible", timeout: 10_000 });
   await sessionRow.click();
+  await page.getByRole("treeitem", { selected: true }).filter({ hasText: sessionTitle }).first()
+    .waitFor({ state: "visible", timeout: 10_000 });
 }
 
 async function stop(child: ChildProcess): Promise<void> {

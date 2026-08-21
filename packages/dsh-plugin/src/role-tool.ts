@@ -8,12 +8,12 @@ export const OH_STORY_ROLE_TOOL_NAME = "oh_story_role";
 
 const roleTools: Readonly<Record<OhStoryRoleName, readonly string[]>> = {
   "chapter-extractor": ["read", "glob", "grep"],
-  "character-designer": ["read", "glob", "grep"],
+  "character-designer": ["read", "glob", "grep", "write", "edit"],
   "consistency-checker": ["read", "glob", "grep"],
-  "narrative-writer": ["read", "glob", "grep", "bash"],
-  "story-architect": ["read", "glob", "grep"],
+  "narrative-writer": ["read", "glob", "grep", "write", "edit", "bash"],
+  "story-architect": ["read", "glob", "grep", "write", "edit"],
   "story-explorer": ["read", "glob", "grep"],
-  "story-researcher": ["read", "glob", "grep", "bash", "web_search", "web_fetch"]
+  "story-researcher": ["read", "glob", "grep", "bash", "write", "web_search", "web_fetch"]
 };
 
 export function roleToolFilter(role: OhStoryRoleName): { readonly allow: readonly string[] } {

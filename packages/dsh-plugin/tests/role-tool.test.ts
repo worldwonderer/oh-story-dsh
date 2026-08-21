@@ -11,9 +11,9 @@ describe("native Oh Story Role tool", () => {
       properties: { role: { enum: expect.arrayContaining(["chapter-extractor", "story-researcher"]) } }
     });
     expect(roleToolFilter("story-explorer")).toEqual({ allow: ["read", "glob", "grep"] });
-    expect(roleToolFilter("narrative-writer")).toEqual({ allow: ["read", "glob", "grep", "bash"] });
+    expect(roleToolFilter("narrative-writer")).toEqual({ allow: ["read", "glob", "grep", "write", "edit", "bash"] });
     expect(roleToolFilter("story-researcher")).toEqual({
-      allow: ["read", "glob", "grep", "bash", "web_search", "web_fetch"]
+      allow: ["read", "glob", "grep", "bash", "write", "web_search", "web_fetch"]
     });
   });
 
@@ -52,7 +52,7 @@ describe("native Oh Story Role tool", () => {
       label: "oh-story:narrative-writer",
       parent: agent,
       persona: expect.stringContaining("OH_STORY_DSH_ROLE:narrative-writer"),
-      toolFilter: { allow: ["read", "glob", "grep", "bash"] },
+      toolFilter: { allow: ["read", "glob", "grep", "write", "edit", "bash"] },
       maxDepth: 1,
       signal
     }));

@@ -1,13 +1,15 @@
-import type { ClientContext, ConversationSnapshot, ISessions, RunningToolCall } from "@deepseek-ai/dsh-client-runtime/client";
+import { defineStore, type ClientContext, type PartialAssistant, type RunningToolCall } from "@deepseek-ai/dsh-client-runtime/client";
 import type {} from "@deepseek-ai/dsh-client-ui-layout/client";
+import type { PropsRenderSlots, PropsRuntime, PropsStore } from "@deepseek-ai/dsh-client-ui-slots";
 import type { ToolCallViewProps } from "@deepseek-ai/dsh-client-ui-tool/client";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   creativeRelativePath,
   fileMutations,
   mutatingCallIds,
   previewMutation,
+  streamingAssistant,
   workbenchModeForPath,
   type WorkbenchMode
 } from "./file-activity.js";
@@ -15,14 +17,15 @@ import { buildFileTree, type FileTreeNode } from "./file-tree.js";
 import { JsonlPreview } from "./jsonl-preview.js";
 import { MarkdownPreview } from "./markdown-preview.js";
 import styles from "./plugin.css?inline";
-import {
-  FILE_ACTIVITY_PROJECTION_KEY,
-  type FileActivityProjection,
-  type ProjectedFileCall
-} from "../file-activity-projection-types.js";
 
 export const name = "oh-story";
-export const inject = ["sessions", "slots"];
+export const inject = ["slots"];
+
+declare module "@deepseek-ai/dsh-client-ui-slots" {
+  interface SlotMap {
+    "oh-story.workspace": { kind: "single"; scope: "session" };
+  }
+}
 
 interface WorkspaceFile { readonly path: string; readonly bytes: number; readonly version: string }
 interface WorkspacePayload {
@@ -54,33 +57,51 @@ interface FileBuffer {
 }
 
 interface WorkbenchMemory {
-  readonly buffers: Record<string, FileBuffer>;
-  readonly editorMode: "preview" | "source";
-  readonly expanded: Record<string, boolean>;
-  readonly selected: string | undefined;
-  readonly workbench: WorkbenchMode;
+  buffers: Record<string, FileBuffer>;
+  editorMode: "preview" | "source";
+  expanded: Record<string, boolean>;
+  selected: string | undefined;
+  workbench: WorkbenchMode;
 }
 
-interface ConversationSnapshotStore {
-  subscribe(listener: () => void): () => void;
-  getSnapshot(): ConversationSnapshot;
+type Update<T> = T | ((current: T) => T);
+
+function applyUpdate<T>(current: T, update: Update<T>): T {
+  return typeof update === "function" ? (update as (value: T) => T)(current) : update;
 }
 
-interface FileActivityProjectionStore {
-  subscribe(listener: () => void): () => void;
-  getSnapshot(): FileActivityProjection | undefined;
+function createWorkbenchStore() {
+  return defineStore({
+    init: (): WorkbenchMemory => ({
+      buffers: {},
+      editorMode: "preview",
+      expanded: {},
+      selected: undefined,
+      workbench: "story"
+    }),
+    actions: {
+      setBuffers: (draft, update: Update<Record<string, FileBuffer>>) => {
+        draft.buffers = applyUpdate(draft.buffers, update);
+      },
+      setEditorMode: (draft, update: Update<WorkbenchMemory["editorMode"]>) => {
+        draft.editorMode = applyUpdate(draft.editorMode, update);
+      },
+      setExpanded: (draft, update: Update<Record<string, boolean>>) => {
+        draft.expanded = applyUpdate(draft.expanded, update);
+      },
+      setSelected: (draft, update: Update<string | undefined>) => {
+        draft.selected = applyUpdate(draft.selected, update);
+      },
+      setWorkbench: (draft, update: Update<WorkbenchMode>) => {
+        draft.workbench = applyUpdate(draft.workbench, update);
+      }
+    }
+  });
 }
-
-const EMPTY_FILE_ACTIVITY_STORE: FileActivityProjectionStore = {
-  subscribe: () => () => undefined,
-  getSnapshot: () => undefined
-};
 
 class WorkspaceRequestError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
 }
-
-const workbenchMemory = new Map<string, WorkbenchMemory>();
 
 const GROUP_ORDER: Readonly<Record<WorkbenchMode, readonly string[]>> = {
   story: ["正文", "大纲", "设定", "追踪", "对标", "参考资料"],
@@ -102,8 +123,6 @@ function preferredFile(files: readonly WorkspaceFile[], mode: WorkbenchMode): st
   }
   return matching[0]?.path;
 }
-
-const EMPTY_CALLS: readonly RunningToolCall[] = [];
 
 function endpoint(path: string, sessionId: string, file?: string): string {
   const url = new URL(`/oh-story/${path}`, globalThis.location.origin);
@@ -193,16 +212,18 @@ function useWorkspace(sessionId: string): {
 function CreativeWorkbench({
   sessionId,
   runningCalls,
-  projectedCalls
+  partial,
+  useStore,
+  actions
 }: {
   readonly sessionId: string;
   readonly runningCalls: readonly RunningToolCall[];
-  readonly projectedCalls: readonly ProjectedFileCall[];
-}) {
+  readonly partial: PartialAssistant | null;
+} & Pick<WorkbenchSlotProps, "useStore" | "actions">) {
   const { workspace, error, loading: workspaceLoading, reload } = useWorkspace(sessionId);
   const activities = useMemo(
-    () => fileMutations(runningCalls, projectedCalls),
-    [projectedCalls, runningCalls]
+    () => fileMutations(runningCalls, partial),
+    [partial, runningCalls]
   );
   const normalizedActivities = useMemo(() => activities.flatMap((activity) => {
     const path = creativeRelativePath(activity.path, workspace?.cwd);
@@ -212,13 +233,16 @@ function CreativeWorkbench({
   const activityPaths = useMemo(() => new Set(normalizedActivities.map((value) => value.path)), [normalizedActivities]);
   const activity = primaryActivity?.activity;
   const activityPath = primaryActivity?.path;
-  const remembered = useMemo(() => workbenchMemory.get(sessionId), [sessionId]);
-  const [workbench, setWorkbench] = useState<WorkbenchMode>(remembered?.workbench ?? "story");
+  const workbench = useStore((memory) => memory.workbench);
+  const setWorkbench = actions.setWorkbench;
   const initializedWorkbench = useRef(false);
-  const [selected, setSelected] = useState<string | undefined>(remembered?.selected);
-  const [buffers, setBuffers] = useState<Record<string, FileBuffer>>(remembered?.buffers ?? {});
+  const selected = useStore((memory) => memory.selected);
+  const setSelected = actions.setSelected;
+  const buffers = useStore((memory) => memory.buffers);
+  const setBuffers = actions.setBuffers;
   const buffersRef = useRef<Record<string, FileBuffer>>({});
-  const [expanded, setExpanded] = useState<Record<string, boolean>>(remembered?.expanded ?? {});
+  const expanded = useStore((memory) => memory.expanded);
+  const setExpanded = actions.setExpanded;
   const surfaceRef = useRef<HTMLDivElement>(null);
   const navRef = useRef<HTMLElement>(null);
   const activityBases = useRef(new Map<string, { readonly path: string; readonly base: string }>());
@@ -234,14 +258,11 @@ function CreativeWorkbench({
   const jsonl = selectedLower?.endsWith(".jsonl") === true;
   const structured = jsonl || selectedLower?.endsWith(".json") === true;
   const previewable = markdown || jsonl;
-  const [editorMode, setEditorMode] = useState<"preview" | "source">(remembered?.editorMode ?? "preview");
+  const editorMode = useStore((memory) => memory.editorMode);
+  const setEditorMode = actions.setEditorMode;
   const modeSelection = useRef(selected);
 
   useEffect(() => { buffersRef.current = buffers; }, [buffers]);
-
-  useEffect(() => {
-    workbenchMemory.set(sessionId, { buffers, editorMode, expanded, selected, workbench });
-  }, [buffers, editorMode, expanded, selected, sessionId, workbench]);
 
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent): void => {
@@ -672,27 +693,14 @@ function CreativeWorkbench({
   </div>;
 }
 
+type WorkbenchSlotProps = PropsRuntime<"oh-story.workspace"> & PropsStore<ReturnType<typeof createWorkbenchStore>>;
+
 /** Mount beside the official conversation without replacing Chat or Composer. */
-function CreativeSplitBridge({ context }: { readonly context: ClientContext }) {
+function CreativeSplitBridge({ sessionId, useSession, useStore, actions }: WorkbenchSlotProps) {
   const marker = useRef<HTMLSpanElement>(null);
   const [target, setTarget] = useState<HTMLElement>();
-  const sessions = context.sessions as unknown as ISessions;
-  const provideFace = sessions.currentProvideInfo;
-  const subscribeProvide = useCallback((listener: () => void) => provideFace.subscribe(listener), [provideFace]);
-  const getProvide = useCallback(() => provideFace.getSnapshot(), [provideFace]);
-  const provide = useSyncExternalStore(subscribeProvide, getProvide, getProvide);
-  const sessionId = provide.sessionId;
-  const source = provide.hooks.session as ConversationSnapshotStore | undefined;
-  const subscribe = useCallback((listener: () => void) => source?.subscribe(listener) ?? (() => undefined), [source]);
-  const getSnapshot = useCallback(() => source?.getSnapshot(), [source]);
-  const snapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
-  const projectionSource = useMemo(
-    () => (provide.projections?.faceOf(FILE_ACTIVITY_PROJECTION_KEY) as FileActivityProjectionStore | undefined) ?? EMPTY_FILE_ACTIVITY_STORE,
-    [provide.projections]
-  );
-  const subscribeProjection = useCallback((listener: () => void) => projectionSource.subscribe(listener), [projectionSource]);
-  const getProjection = useCallback(() => projectionSource.getSnapshot(), [projectionSource]);
-  const projection = useSyncExternalStore(subscribeProjection, getProjection, getProjection);
+  const runningCalls = useSession((snapshot) => snapshot.runningCalls);
+  const partial = useSession((snapshot) => streamingAssistant(snapshot.chat.timeline));
   useLayoutEffect(() => {
     const document = marker.current?.ownerDocument;
     if (document === undefined) return;
@@ -721,13 +729,20 @@ function CreativeSplitBridge({ context }: { readonly context: ClientContext }) {
   }, [target]);
   return <>
     <span ref={marker} className="oh-story-bridge-marker" aria-hidden />
-    {target === undefined || sessionId === undefined ? null : createPortal(<CreativeWorkbench
-      key={sessionId}
+    {target === undefined ? null : createPortal(<CreativeWorkbench
       sessionId={sessionId}
-      runningCalls={snapshot?.runningCalls ?? EMPTY_CALLS}
-      projectedCalls={projection?.calls ?? []}
+      runningCalls={runningCalls}
+      partial={partial}
+      useStore={useStore}
+      actions={actions}
     />, target)}
   </>;
+}
+
+type WorkbenchSeatProps = PropsRuntime<"shell.overlay"> & PropsRenderSlots<"oh-story.workspace">;
+
+function WorkbenchSeat({ SessionProvider, renderSlot }: WorkbenchSeatProps) {
+  return <SessionProvider>{() => renderSlot("oh-story.workspace", {})}</SessionProvider>;
 }
 
 function argsOf(block: ToolCallViewProps["block"]): Record<string, unknown> {
@@ -758,11 +773,19 @@ function RoleToolView({ block, inspect }: ToolCallViewProps) {
 
 /** Register only official DSH surfaces; the split bridge never replaces Chat. */
 export function apply(context: ClientContext): void {
-  context.slots.inject("shell.overlay", () => context.slots.register({
-    name: "shell.overlay",
-    id: "oh-story-workspace",
-    order: -100
-  }, () => <CreativeSplitBridge context={context} />));
+  context.slots.inject("shell.overlay", () => {
+    const disposeSeat = context.slots.register({
+      name: "shell.overlay",
+      id: "oh-story-workspace",
+      order: -100,
+      children: { "oh-story.workspace": { kind: "single", scope: "session" } }
+    }, WorkbenchSeat);
+    const disposeWorkbench = context.slots.register({
+      name: "oh-story.workspace",
+      store: createWorkbenchStore
+    }, CreativeSplitBridge);
+    return [disposeSeat, disposeWorkbench];
+  });
   context.slots.inject("tool.call.toolview", () => context.slots.register({
     name: "tool.call.toolview",
     key: "oh_story_role"

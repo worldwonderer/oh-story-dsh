@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+### Changed
+
+- 文件生成预览改用 DSH Session 的 Step location data 与 `runningCalls`，移除重复的 Host Projection。
+- 小说工作台状态改由 DSH 的 Session-scoped Slot Store 管理。
+- 专业 Role 保留上游声明的结构化 `write`、`edit` 工具，并继续受当前 Agent 可见工具约束。
+
+### Fixed
+
+- 长篇写作 Guard 现在读取调用 Agent 的 DSH FileSystem，可正确支持 sandbox、remote 与自定义文件系统。
+
 ## [0.1.1] - 2026-08-21
 
 ### Added
