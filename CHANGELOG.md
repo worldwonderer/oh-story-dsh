@@ -6,13 +6,19 @@
 
 ### Changed
 
-- 文件生成预览改用 DSH Session 的 Step location data 与 `runningCalls`，移除重复的 Host Projection。
+- 文件生成预览改用 DSH Session 的 Step location data、`runningCalls` 与已落地 Tool diff，移除重复的 Host Projection。
 - 小说工作台状态改由 DSH 的 Session-scoped Slot Store 管理。
 - 专业 Role 保留上游声明的结构化 `write`、`edit` 工具，并继续受当前 Agent 可见工具约束。
+- 单一类型 workspace 以静态标签标识小说或短剧；仅在空项目或混合项目中显示类型切换。
+- 三栏比例改由 DSH 会话容器的实际宽度驱动，并继续复用官方界面 token。
 
 ### Fixed
 
 - 长篇写作 Guard 现在读取调用 Agent 的 DSH FileSystem，可正确支持 sandbox、remote 与自定义文件系统。
+- Agent 修改其他文件时不再打断正在输入的本地草稿。
+- 极快完成的 Agent 文件调用也会在落地后定位并刷新编辑器。
+- 源码与预览切换会恢复长文的滚动位置、光标和选区。
+- 改善紧凑三栏中的深层文件名、编辑器路径和 JSONL 记录可读性，并补全工作台 Tab 的键盘导航。
 
 ## [0.1.1] - 2026-08-21
 

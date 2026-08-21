@@ -1,4 +1,5 @@
 import type {
+  ChatSnapshot,
   ConversationTimelineSnapshot,
   PartialAssistant,
   RunningToolCall,
@@ -195,6 +196,33 @@ export function mutatingCallIds(runningCalls: readonly RunningToolCall[]): Reado
   const ids = new Set<string>();
   visitRunning(runningCalls, (call) => { if (MUTATING_CALLS.has(call.name)) ids.add(call.callId); });
   return ids;
+}
+
+function settledMutationSignals(block: ToolCallBlock): string[] {
+  const nested = block.subCalls.flatMap(settledMutationSignals);
+  if (!("kind" in block) || block.isError) return nested;
+  const diffs = block.resultView?.card === "diff"
+    ? block.resultView.diffs
+    : block.callView?.card === "diff" ? block.callView.diffs : undefined;
+  if (diffs !== undefined) return [
+    ...diffs.map((diff, index) => `${block.callId}:${String(index)}\0${diff.path}`),
+    ...nested
+  ];
+  if (block.call === null) return nested;
+  const mutation = mutationFromArgs(block.call.name, block.callId, block.call.argsRaw, "running");
+  return mutation?.path === undefined ? nested : [`${block.callId}\0${mutation.path}`, ...nested];
+}
+
+/** Latest durable successful mutation, used when a fast call skips the live render window. */
+export function latestSettledMutation(chat: ChatSnapshot): string | undefined {
+  for (const key of chat.order.toReversed()) {
+    const node = chat.nodes.get(key);
+    if (node?.kind !== "tool-call") continue;
+    const root = (node.data as { readonly root?: ToolCallBlock }).root;
+    const signal = root === undefined ? undefined : settledMutationSignals(root).at(-1);
+    if (signal !== undefined) return signal;
+  }
+  return undefined;
 }
 
 /** Convert a DSH tool path to the creative-relative path accepted by the narrow route. */

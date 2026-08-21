@@ -1,9 +1,10 @@
-import type { ConversationTimelineSnapshot, RunningToolCall } from "@deepseek-ai/dsh-client-runtime/client";
+import type { ChatSnapshot, ConversationTimelineSnapshot, RunningToolCall } from "@deepseek-ai/dsh-client-runtime/client";
 import { describe, expect, it } from "vitest";
 import {
   creativeRelativePath,
   fileMutations,
   jsonStringPrefix,
+  latestSettledMutation,
   mutatingCallIds,
   previewMutation,
   streamingAssistant,
@@ -108,6 +109,29 @@ describe("official DSH file activity", () => {
     }];
     expect(fileMutations(running).map((value) => value.path)).toEqual(["正文/A.md", "正文/B.md"]);
     expect([...mutatingCallIds(running)]).toEqual(["code-1", "write-a", "write-b"]);
+  });
+
+  it("uses the latest durable DSH diff when a fast call leaves the live window", () => {
+    const node = {
+      key: "tool:write-1",
+      kind: "tool-call",
+      data: {
+        root: {
+          kind: "tool-result",
+          callId: "write-1",
+          isError: false,
+          call: { name: "write", argsRaw: '{"file_path":"正文/新章.md","content":"完成"}' },
+          callView: { card: "diff", title: "Write", diffs: [{ path: "正文/新章.md", oldText: null, newText: "完成" }] },
+          resultView: null,
+          subCalls: []
+        }
+      }
+    };
+    const chat = {
+      order: [node.key],
+      nodes: { get: (key: string) => key === node.key ? node : undefined }
+    } as unknown as ChatSnapshot;
+    expect(latestSettledMutation(chat)).toBe("write-1:0\0正文/新章.md");
   });
 
   it("uses official diff views and supports replace-all and deletion", () => {

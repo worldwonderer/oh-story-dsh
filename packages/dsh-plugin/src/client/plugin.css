@@ -1,14 +1,14 @@
 .oh-story-bridge-marker { display: none; }
-.oh-story-split-surface { display: contents; }
+.oh-story-split-surface { display: contents; font-family: var(--dsw-font-family); }
 
 /* DSH documents every [data-slot] wrapper as a stable addressable styling
    seam. The official Session body and composer stay mounted; this only turns
    their scroll host into a three-column writing surface. */
 [data-conversation-scroll]:has(> [data-slot="conversation.session"] > .oh-story-split-surface) {
   --os-border: var(--dsw-alias-border-l2);
-  --os-muted: var(--dsw-alias-label-tertiary);
+  --os-muted: var(--dsw-alias-label-secondary);
   display: grid;
-  grid-template-columns: clamp(96px, 16%, 190px) minmax(180px, 1fr) minmax(252px, 38%);
+  grid-template-columns: clamp(184px, 16%, 200px) minmax(240px, 1fr) clamp(408px, 40%, 520px);
   grid-template-rows: minmax(0, 1fr);
   min-height: 0;
   overflow-x: hidden;
@@ -76,7 +76,10 @@
   gap: 12px;
 }
 
-.oh-story-brand { min-height: 28px; padding: 0 5px 10px 7px; font-size: 14px; font-weight: 500; }
+.oh-story-brand { min-height: 28px; gap: 8px; padding: 0 5px 8px 7px; font-size: 14px; font-weight: 500; white-space: nowrap; }
+.oh-story-brand-cluster { display: flex; min-width: 0; align-items: center; gap: 6px; }
+.oh-story-brand-cluster strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: inherit; }
+.oh-story-kind { flex: none; padding: 1px 6px; border-radius: 5px; color: var(--dsw-alias-label-secondary); background: var(--dsw-alias-button-ghost-active-fill); font-size: 11px; line-height: 16px; font-weight: 500; }
 
 .oh-story-brand button,
 .oh-story-save,
@@ -102,39 +105,26 @@
 .oh-story-role button:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary); outline-offset: -2px; }
 .oh-story-save:disabled { opacity: .48; cursor: default; }
 
-.oh-story-mode-tabs {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  margin: 0 4px 10px;
-  border-bottom: 1px solid var(--os-border);
-}
+.oh-story-mode-tabs { display: flex; margin: 0 4px 8px; padding: 2px; border: 1px solid var(--os-border); border-radius: 7px; background: var(--dsw-alias-bg-layer-1); }
 
 .oh-story-mode-tabs button,
 .oh-story-editor-tabs button {
   position: relative;
-  min-height: 30px;
+  min-height: 24px;
+  flex: 1;
   border: 0;
   color: var(--os-muted);
   background: transparent;
+  border-radius: 5px;
   cursor: pointer;
   font: inherit;
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .oh-story-mode-tabs button:hover,
 .oh-story-editor-tabs button:hover { color: var(--dsw-alias-label-primary); }
 .oh-story-mode-tabs button[aria-selected="true"],
-.oh-story-editor-tabs button[aria-selected="true"] { color: var(--dsw-alias-label-primary); font-weight: 500; }
-.oh-story-mode-tabs button[aria-selected="true"]::after {
-  position: absolute;
-  right: 14px;
-  bottom: -1px;
-  left: 14px;
-  height: 2px;
-  border-radius: 2px 2px 0 0;
-  background: var(--dsw-alias-state-business-primary);
-  content: "";
-}
+.oh-story-editor-tabs button[aria-selected="true"] { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-base); box-shadow: 0 1px 2px rgb(0 0 0 / 8%); font-weight: 500; }
 
 .oh-story-file-group,
 .oh-story-file-folder { margin: 0; }
@@ -152,6 +142,7 @@
   font-size: 11px;
   font-weight: 600;
 }
+.oh-story-file-folder > summary { padding-left: min(calc(7px + var(--oh-story-indent, 0px)), 49px); }
 .oh-story-file-group > summary { margin-top: 3px; }
 .oh-story-file-group > summary::-webkit-details-marker,
 .oh-story-file-folder > summary::-webkit-details-marker { display: none; }
@@ -162,13 +153,13 @@
 .oh-story-file-group > summary:hover,
 .oh-story-file-folder > summary:hover { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-interactive-bg-hover); }
 .oh-story-file-group > summary span,
-.oh-story-file-folder > summary span { margin-left: auto; color: var(--dsw-alias-label-caption); font-weight: 400; }
+.oh-story-file-folder > summary span { margin-left: auto; color: var(--dsw-alias-label-secondary); font-weight: 400; }
 
 .oh-story-tree nav button {
   display: block;
   width: 100%;
   overflow: hidden;
-  padding: 6px 8px;
+  padding: 6px 8px 6px min(calc(14px + var(--oh-story-indent, 0px)), 56px);
   border: 0;
   border-radius: 6px;
   color: inherit;
@@ -191,13 +182,17 @@
   border-bottom: 1px solid var(--os-border);
 }
 
-.oh-story-editor header span {
+.oh-story-editor-path {
   overflow: hidden;
+  min-width: 0;
+  flex: 1;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 12px;
   color: var(--os-muted);
 }
+.oh-story-editor-path > span { overflow: hidden; display: block; text-overflow: ellipsis; }
+.oh-story-editor-path > strong { display: none; overflow: hidden; text-overflow: ellipsis; font: inherit; }
 
 .oh-story-editor-actions { display: flex; flex: none; align-items: center; gap: 8px; }
 .oh-story-editor-tabs {
@@ -208,7 +203,6 @@
   background: var(--dsw-alias-bg-layer-1);
 }
 .oh-story-editor-tabs button { min-height: 24px; padding: 0 9px; border-radius: 5px; font-size: 11px; }
-.oh-story-editor-tabs button[aria-selected="true"] { background: var(--dsw-alias-bg-base); box-shadow: 0 1px 2px rgb(0 0 0 / 8%); }
 .oh-story-save { min-height: 28px; }
 
 .oh-story-editor textarea {
@@ -219,7 +213,7 @@
   resize: none;
   border: 0;
   outline: 0;
-  padding: clamp(20px, 4vw, 48px) clamp(22px, 6vw, 84px) 48px;
+  padding: clamp(20px, 6%, 48px) clamp(22px, 10%, 84px) 48px;
   color: var(--dsw-alias-label-primary);
   background: transparent;
   font: 16px/1.9 ui-serif, "Songti SC", "STSong", Georgia, serif;
@@ -235,7 +229,7 @@
   min-height: 0;
   flex: 1;
   overflow: auto;
-  padding: clamp(24px, 5vw, 56px) clamp(24px, 7vw, 92px) 64px;
+  padding: clamp(24px, 8%, 56px) clamp(24px, 10%, 92px) 64px;
   color: var(--dsw-alias-label-primary);
   font: 16px/1.85 ui-serif, "Songti SC", "STSong", Georgia, serif;
   overflow-wrap: anywhere;
@@ -247,7 +241,7 @@
 .oh-story-markdown h3,
 .oh-story-markdown h4,
 .oh-story-markdown h5,
-.oh-story-markdown h6 { margin: 1.45em 0 .6em; font-family: ui-sans-serif, system-ui, "PingFang SC", sans-serif; line-height: 1.35; letter-spacing: -.01em; }
+.oh-story-markdown h6 { margin: 1.45em 0 .6em; font-family: var(--dsw-font-family); line-height: 1.35; letter-spacing: -.01em; }
 .oh-story-markdown h1 { font-size: 1.75em; }
 .oh-story-markdown h2 { padding-bottom: .35em; border-bottom: 1px solid var(--os-border); font-size: 1.35em; }
 .oh-story-markdown h3 { font-size: 1.15em; }
@@ -292,7 +286,7 @@
 .oh-story-jsonl-records { overflow: auto; padding: 14px 18px 36px; }
 .oh-story-jsonl details,
 .oh-story-jsonl-error { overflow: hidden; margin-bottom: 10px; border: 1px solid var(--os-border); border-radius: 10px; background: var(--dsw-alias-bg-layer-1); }
-.oh-story-jsonl summary { display: flex; min-height: 42px; align-items: center; gap: 9px; padding: 0 12px; cursor: pointer; list-style: none; font: 12px/1.4 ui-sans-serif, system-ui, "PingFang SC", sans-serif; }
+.oh-story-jsonl summary { display: flex; min-height: 42px; align-items: center; gap: 9px; padding: 0 12px; cursor: pointer; list-style: none; font: 12px/1.4 var(--dsw-font-family); }
 .oh-story-jsonl summary::-webkit-details-marker { display: none; }
 .oh-story-jsonl summary::before { content: "›"; color: var(--os-muted); font-size: 16px; transition: transform .12s ease; }
 .oh-story-jsonl details[open] summary::before { transform: rotate(90deg); }
@@ -348,25 +342,49 @@
 .oh-story-role pre { max-height: 260px; overflow: auto; margin: 4px 0 4px 4px; padding: 12px 16px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 12px; color: var(--dsw-alias-label-secondary); background: var(--dsw-alias-markdown-code-block); white-space: pre-wrap; font: var(--dsw-font-markdown-code-block-small); }
 .oh-story-role > button { align-self: flex-start; margin: 4px 0 2px 4px; font-size: 11px; }
 
-@media (max-width: 980px) {
-  [data-conversation-scroll]:has(> [data-slot="conversation.session"] > .oh-story-split-surface) {
-    grid-template-columns: 104px minmax(210px, 1fr) minmax(252px, 40%);
-  }
-  .oh-story-editor textarea { padding-right: 28px; padding-left: 28px; }
+[data-conversation-scroll][data-oh-story-layout="medium"]:has(> [data-slot="conversation.session"] > .oh-story-split-surface) {
+  grid-template-columns: clamp(104px, 18%, 184px) minmax(200px, 1fr) clamp(300px, 45%, 408px);
 }
 
-@media (max-width: 700px) {
-  [data-conversation-scroll]:has(> [data-slot="conversation.session"] > .oh-story-split-surface) {
-    grid-template-columns: 72px minmax(0, 1fr) 236px;
-  }
-  .oh-story-tree { padding-inline: 5px; }
-  .oh-story-brand { padding-inline: 3px; font-size: 11px; }
-  .oh-story-brand button { width: 24px; }
-  .oh-story-mode-tabs { margin-inline: 0; }
-  .oh-story-mode-tabs button { font-size: 10px; }
-  .oh-story-editor header { padding-inline: 7px; }
-  .oh-story-editor header > span { display: none; }
-  .oh-story-editor-tabs button { padding-inline: 6px; }
-  .oh-story-jsonl summary > code,
-  .oh-story-jsonl summary > em { display: none; }
+[data-conversation-scroll][data-oh-story-layout="compact"]:has(> [data-slot="conversation.session"] > .oh-story-split-surface) {
+  grid-template-columns: clamp(80px, 16%, 104px) minmax(0, 1fr) clamp(228px, 48%, 300px);
 }
+
+[data-oh-story-layout="medium"] .oh-story-file-folder > summary { padding-left: min(calc(7px + var(--oh-story-indent, 0px)), 35px); }
+[data-oh-story-layout="medium"] .oh-story-tree nav button { padding-left: min(calc(14px + var(--oh-story-indent, 0px)), 42px); }
+[data-oh-story-layout="medium"] .oh-story-editor textarea { padding-right: 28px; padding-left: 28px; }
+
+[data-oh-story-layout="compact"] .oh-story-tree { padding-inline: 4px; }
+[data-oh-story-layout="compact"] .oh-story-brand { gap: 4px; padding-inline: 2px; font-size: 11px; }
+[data-oh-story-layout="compact"] .oh-story-brand-cluster { gap: 4px; }
+[data-oh-story-layout="compact"] .oh-story-brand-cluster strong > span { display: none; }
+[data-oh-story-layout="compact"] .oh-story-kind { padding-inline: 4px; font-size: 11px; }
+[data-oh-story-layout="compact"] .oh-story-brand button { width: 24px; height: 24px; }
+[data-oh-story-layout="compact"] .oh-story-mode-tabs { margin-inline: 0; }
+[data-oh-story-layout="compact"] .oh-story-mode-tabs button { padding-inline: 3px; font-size: 11px; }
+[data-oh-story-layout="compact"] .oh-story-file-folder > summary { padding-left: min(calc(5px + var(--oh-story-indent, 0px)), 19px); }
+[data-oh-story-layout="compact"] .oh-story-tree nav button { padding-right: 4px; padding-left: min(calc(7px + var(--oh-story-indent, 0px)), 21px); }
+[data-oh-story-layout="compact"] .oh-story-editor header {
+  display: grid;
+  min-height: 68px;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: 24px 36px;
+  align-content: center;
+  gap: 0;
+  padding: 4px 3px;
+}
+[data-oh-story-layout="compact"] .oh-story-editor-path > span { display: none; }
+[data-oh-story-layout="compact"] .oh-story-editor-path > strong { display: block; font-size: 11px; line-height: 24px; }
+[data-oh-story-layout="compact"] .oh-story-editor-actions { width: 100%; min-width: 0; justify-content: flex-end; gap: 4px; }
+[data-oh-story-layout="compact"] .oh-story-editor-tabs { min-width: 0; flex: 1; }
+[data-oh-story-layout="compact"] .oh-story-editor-tabs button { min-width: 0; padding-inline: 2px; white-space: nowrap; }
+[data-oh-story-layout="compact"] .oh-story-save { flex: none; padding-inline: 4px; white-space: nowrap; font-size: 11px; }
+[data-oh-story-layout="compact"] .oh-story-editor textarea { padding: 16px 12px 40px; }
+[data-oh-story-layout="compact"] .oh-story-markdown { padding: 18px 12px 48px; }
+[data-oh-story-layout="compact"] .oh-story-jsonl-summary { padding-inline: 10px; }
+[data-oh-story-layout="compact"] .oh-story-jsonl-records { padding: 8px 7px 28px; }
+[data-oh-story-layout="compact"] .oh-story-jsonl summary { gap: 6px; padding-inline: 7px; }
+[data-oh-story-layout="compact"] .oh-story-jsonl summary > span { display: none; }
+[data-oh-story-layout="compact"] .oh-story-jsonl summary > strong { min-width: 32px; }
+[data-oh-story-layout="compact"] .oh-story-jsonl summary > code,
+[data-oh-story-layout="compact"] .oh-story-jsonl summary > em { display: none; }

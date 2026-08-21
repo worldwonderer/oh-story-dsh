@@ -79,8 +79,10 @@ async function startMockDeepSeek(): Promise<MockDeepSeek> {
       }
       const serialized = JSON.stringify(payload);
       const messages = (payload as { readonly messages?: readonly { readonly role?: string }[] }).messages ?? [];
-      const mutationTurn = serialized.includes(agentMutationPrompt);
-      const hasToolResult = messages.some((message) => message.role === "tool");
+      const lastUserIndex = messages.findLastIndex((message) => message.role === "user");
+      const currentTurn = JSON.stringify(messages.slice(Math.max(lastUserIndex, 0)));
+      const mutationTurn = currentTurn.includes(agentMutationPrompt);
+      const hasToolResult = messages.slice(lastUserIndex + 1).some((message) => message.role === "tool");
       let events: string[];
       if (mutationTurn && !hasToolResult) {
         const argumentsJson = JSON.stringify({ file_path: agentMutationPath, content: agentMutationContent });
@@ -109,6 +111,8 @@ async function startMockDeepSeek(): Promise<MockDeepSeek> {
         "content-type": "text/event-stream",
         connection: "keep-alive"
       });
+      response.flushHeaders();
+      response.socket?.setNoDelay(true);
       for (const event of events) {
         response.write(`data: ${event}\n\n`);
         if (mutationTurn && !hasToolResult) await new Promise((accept) => setTimeout(accept, 180));
@@ -491,25 +495,44 @@ async function main(): Promise<void> {
         const body = (await page.locator("body").innerText()).slice(0, 4_000);
         throw new Error(`Three-column story surface was not visible; tabs=${JSON.stringify(tabs)}; pageErrors=${JSON.stringify(pageErrors)}; body=${JSON.stringify(body)}`, { cause: error });
       }
-      await page.getByText(storyPrompt, { exact: true }).waitFor({ state: "visible", timeout: 10_000 });
+      const storyKind = page.locator(".oh-story-kind");
+      await storyKind.waitFor({ state: "visible", timeout: 10_000 });
+      if (await storyKind.textContent() !== "小说" || await page.getByRole("tablist", { name: "创作工作台" }).count() !== 0) {
+        throw new Error("A story-only workspace still rendered a redundant type switcher.");
+      }
+      if (await page.getByRole("button", { name: "刷新项目文件", exact: true }).count() !== 1) {
+        throw new Error("The workspace refresh control has no descriptive accessible name.");
+      }
+      try { await page.getByText(storyPrompt, { exact: true }).waitFor({ state: "visible", timeout: 20_000 }); }
+      catch (error) {
+        const selectedRows = await page.getByRole("treeitem", { selected: true }).allTextContents();
+        const body = (await page.locator("body").innerText()).slice(0, 4_000);
+        const history = await rpc<{ readonly events: readonly { readonly event: HistoryEvent }[] }>(origin, "session.history", { sessionId: storySession.sessionId, maxMessages: 1_000 });
+        throw new Error(`Story Session selection did not render its Chat; selected=${JSON.stringify(selectedRows)}; url=${page.url()}; historyTail=${JSON.stringify(history.events.slice(-8).map((entry) => entry.event.type))}; body=${JSON.stringify(body)}`, { cause: error });
+      }
       if (!useRealDeepSeek) await page.getByText(`已读取《${storyProjectName}》工程。`, { exact: false }).waitFor({ state: "visible", timeout: 10_000 });
       if (await page.getByText("This turn failed", { exact: false }).isVisible()) throw new Error("Story Chat contains a failed turn.");
 
       if (!useRealDeepSeek) {
-        await rpc(origin, "session.prompt", {
+        const mutationPrompt = rpc(origin, "session.prompt", {
           sessionId: storySession.sessionId,
           mode: "queue",
           content: [{ type: "text", text: agentMutationPrompt }]
         });
         const streamedEditor = page.getByRole("textbox", { name: agentMutationPath });
         const streamedValues = new Set<string>();
-        for (let sample = 0; sample < 40; sample += 1) {
+        for (let sample = 0; sample < 120; sample += 1) {
           if (await streamedEditor.isVisible()) streamedValues.add(await streamedEditor.inputValue());
+          if (streamedValues.size > 1 && await page.getByText(agentMutationReply, { exact: true }).isVisible()) break;
           await page.waitForTimeout(75);
         }
+        await mutationPrompt;
         if (streamedValues.size === 0) {
           const history = await rpc<{ readonly events: readonly { readonly event: HistoryEvent }[] }>(origin, "session.history", { sessionId: storySession.sessionId, maxMessages: 1_000 });
-          throw new Error(`Agent write never reached the editor; tailEvents=${JSON.stringify(history.events.slice(-12).map((entry) => entry.event.type))}`);
+          const selected = await page.locator("button[data-file-path][aria-current='page']").getAttribute("data-file-path");
+          const target = page.locator(`button[data-file-path=${JSON.stringify(agentMutationPath)}]`);
+          const targetCurrent = await target.count() === 0 ? null : await target.getAttribute("aria-current");
+          throw new Error(`Agent write never reached the editor; selected=${JSON.stringify(selected)}; targetCurrent=${JSON.stringify(targetCurrent)}; tailEvents=${JSON.stringify(history.events.slice(-12).map((entry) => entry.event.type))}`);
         }
         const approval = page.getByRole("button", { name: /^(?:Allow once|允许一次)$/u });
         try {
@@ -542,9 +565,63 @@ async function main(): Promise<void> {
         await officialWriteFile.click();
         await agentTreeFile.waitFor({ state: "visible", timeout: 10_000 });
         if (await agentTreeFile.getAttribute("aria-current") !== "page") throw new Error("Official Chat tool file did not expand and locate the Agent-written file.");
+
+        await selectFile(page, chapterPath);
+        await page.getByRole("tab", { name: "源码", exact: true }).click();
+        const protectedEditor = page.getByRole("textbox", { name: chapterPath });
+        const protectedDraft = `${chapter.content}\n<!-- focused human draft -->\n`;
+        await protectedEditor.fill(protectedDraft);
+        await protectedEditor.focus();
+        const repliesBefore = await page.getByText(agentMutationReply, { exact: true }).count();
+        await rpc(origin, "session.prompt", {
+          sessionId: storySession.sessionId,
+          mode: "queue",
+          content: [{ type: "text", text: agentMutationPrompt }]
+        });
+        await page.waitForFunction((path) => document.querySelector(`button[data-file-path=${JSON.stringify(path)}][data-agent-target]`)?.checkVisibility() === true, agentMutationPath);
+        const protectedSelected = page.locator(`button[data-file-path=${JSON.stringify(chapterPath)}]`);
+        if (await protectedSelected.getAttribute("aria-current") !== "page" || !await protectedEditor.evaluate((element) => document.activeElement === element)) {
+          throw new Error("Agent auto-follow interrupted a focused human draft.");
+        }
+        await protectedEditor.pressSequentially("继续输入");
+        if (!await protectedEditor.inputValue().then((value) => value.endsWith("继续输入"))) {
+          throw new Error("Typing after a concurrent Agent write did not stay in the human draft.");
+        }
+        const replyDeadline = Date.now() + 20_000;
+        while (await page.getByText(agentMutationReply, { exact: true }).count() <= repliesBefore) {
+          if (Date.now() >= replyDeadline) throw new Error("The concurrent Agent write did not settle.");
+          await page.waitForTimeout(100);
+        }
+        const concurrentAgentFile = await (await fetch(agentFileUrl)).json() as { readonly content?: string };
+        if (concurrentAgentFile.content !== agentMutationContent || !await protectedEditor.inputValue().then((value) => value.endsWith("继续输入"))) {
+          throw new Error("Concurrent Agent and human edits did not remain isolated.");
+        }
+
         await rm(join(storyRoot, agentMutationPath));
         await page.getByTitle("刷新").click();
         await agentTreeFile.waitFor({ state: "detached", timeout: 10_000 });
+
+        const mixedMarker = join(storyRoot, "short-drama.json");
+        await writeFile(mixedMarker, '{"title":"mixed-workspace-smoke"}\n');
+        await page.getByRole("button", { name: "刷新项目文件", exact: true }).click();
+        const workbenchTabs = page.getByRole("tablist", { name: "创作工作台" });
+        await workbenchTabs.waitFor({ state: "visible", timeout: 10_000 });
+        if (await page.locator(".oh-story-kind").count() !== 0) throw new Error("A mixed workspace rendered both a type badge and switcher.");
+        const storyTab = workbenchTabs.getByRole("tab", { name: "小说", exact: true });
+        const dramaTab = workbenchTabs.getByRole("tab", { name: "短剧", exact: true });
+        await storyTab.focus();
+        await storyTab.press("ArrowRight");
+        if (await dramaTab.getAttribute("aria-selected") !== "true" || !await dramaTab.evaluate((element) => document.activeElement === element)) {
+          throw new Error("Workspace tabs did not support roving ArrowRight navigation.");
+        }
+        await dramaTab.press("ArrowLeft");
+        if (await storyTab.getAttribute("aria-selected") !== "true" || !await storyTab.evaluate((element) => document.activeElement === element)) {
+          throw new Error("Workspace tabs did not support roving ArrowLeft navigation.");
+        }
+        await rm(mixedMarker);
+        await page.getByRole("button", { name: "刷新项目文件", exact: true }).click();
+        await workbenchTabs.waitFor({ state: "detached", timeout: 10_000 });
+        await page.locator(".oh-story-kind").filter({ hasText: "小说" }).waitFor({ state: "visible", timeout: 10_000 });
       }
       await prepareDemoSurface(page);
       const previewTab = page.getByRole("tab", { name: "预览" });
@@ -554,9 +631,37 @@ async function main(): Promise<void> {
       await selectFile(page, chapterPath);
       await page.getByRole("article", { name: `${chapterPath} 渲染预览` }).waitFor({ state: "visible", timeout: 10_000 });
       await captureDemoFrame(page, "story", 1);
-      await page.getByRole("tab", { name: "源码", exact: true }).click();
+      const sourceTab = page.getByRole("tab", { name: "源码", exact: true });
+      await previewTab.focus();
+      await previewTab.press("End");
+      if (await sourceTab.getAttribute("aria-selected") !== "true" || !await sourceTab.evaluate((element) => document.activeElement === element)) {
+        throw new Error("Editor tabs did not support End-key navigation.");
+      }
+      await sourceTab.press("Home");
+      if (await previewTab.getAttribute("aria-selected") !== "true" || !await previewTab.evaluate((element) => document.activeElement === element)) {
+        throw new Error("Editor tabs did not support Home-key navigation.");
+      }
+      await sourceTab.click();
       const chapterEditor = page.getByRole("textbox", { name: chapterPath });
       await chapterEditor.waitFor({ state: "visible", timeout: 10_000 });
+      const editorPosition = await chapterEditor.evaluate((element) => {
+        element.focus();
+        element.setSelectionRange(420, 438);
+        element.scrollTop = 5_000;
+        return { scrollTop: element.scrollTop, selectionStart: element.selectionStart, selectionEnd: element.selectionEnd };
+      });
+      await previewTab.click();
+      await sourceTab.click();
+      const restoredPosition = await chapterEditor.evaluate((element) => ({
+        scrollTop: element.scrollTop,
+        selectionStart: element.selectionStart,
+        selectionEnd: element.selectionEnd
+      }));
+      if (Math.abs(restoredPosition.scrollTop - editorPosition.scrollTop) > 1
+        || restoredPosition.selectionStart !== editorPosition.selectionStart
+        || restoredPosition.selectionEnd !== editorPosition.selectionEnd) {
+        throw new Error(`Editor preview/source toggle lost its position: ${JSON.stringify({ editorPosition, restoredPosition })}`);
+      }
       const draftChapter = `${chapter.content}\n<!-- session draft smoke -->\n`;
       await chapterEditor.fill(draftChapter);
       await selectSession(page, dramaWorkspace.workspace.title, dramaSessionTitle);
@@ -648,7 +753,12 @@ async function main(): Promise<void> {
       await selectSession(page, dramaWorkspace.workspace.title, dramaSessionTitle);
       const dramaTree = page.getByRole("navigation", { name: "短剧项目文件" });
       await dramaTree.waitFor({ state: "visible", timeout: 10_000 });
-      await page.getByText(dramaPrompt, { exact: true }).waitFor({ state: "visible", timeout: 10_000 });
+      const dramaKind = page.locator(".oh-story-kind");
+      await dramaKind.waitFor({ state: "visible", timeout: 10_000 });
+      if (await dramaKind.textContent() !== "短剧" || await page.getByRole("tablist", { name: "创作工作台" }).count() !== 0) {
+        throw new Error("A drama-only workspace still rendered a redundant type switcher.");
+      }
+      await page.getByText(dramaPrompt, { exact: true }).waitFor({ state: "visible", timeout: 20_000 });
       if (!useRealDeepSeek) await page.getByText(dramaReply, { exact: true }).waitFor({ state: "visible", timeout: 10_000 });
       if (await page.getByText("This turn failed", { exact: false }).isVisible()) throw new Error("Drama Chat contains a failed turn.");
       await prepareDemoSurface(page);
@@ -690,6 +800,9 @@ async function main(): Promise<void> {
         throw new Error(`Invalid three-column geometry: ${JSON.stringify(geometry)}`);
       }
       const scrollerLocator = page.locator("[data-conversation-scroll]");
+      if (await scrollerLocator.getAttribute("data-oh-story-layout") !== "wide") {
+        throw new Error("Workbench did not derive its wide layout from the conversation container.");
+      }
       const scrollViewport = await scrollerLocator.boundingBox();
       if (scrollViewport === null) throw new Error("Missing conversation scroll viewport.");
       const priorMinHeight = await chatLocator.evaluate((element) => element.style.minHeight);
@@ -736,10 +849,17 @@ async function main(): Promise<void> {
       }));
       if (narrowTree === null || narrowEditor === null || narrowChat === null
         || narrowScroller.clientWidth < 620
+        || await scrollerLocator.getAttribute("data-oh-story-layout") !== "medium"
         || narrowWorkbench.scrollWidth > narrowWorkbench.clientWidth + 1
         || narrowTree.width < 100 || narrowEditor.width < 200 || narrowChat.width < 240) {
         throw new Error(`Workbench overflowed the minimum DSH center width: ${JSON.stringify({ narrowViewportWidth, narrowScroller, narrowWorkbench, narrowTree, narrowEditor, narrowChat })}`);
       }
+      await openGroup(page, "剧集");
+      await openFolder(page, "EP001");
+      await openFolder(page, "storyboard");
+      const compactPath = "剧集/EP001/storyboard/shots.jsonl";
+      await selectFile(page, compactPath);
+      await page.getByRole("region", { name: `${compactPath} 结构化预览` }).waitFor({ state: "visible", timeout: 10_000 });
       await page.setViewportSize({ width: 500, height: 900 });
       await page.waitForTimeout(100);
       const compactScroller = await scrollerLocator.evaluate((element) => ({ clientWidth: element.clientWidth, scrollWidth: element.scrollWidth }));
@@ -748,16 +868,42 @@ async function main(): Promise<void> {
         page.locator(".oh-story-editor").boundingBox(),
         chatLocator.boundingBox(),
         composerLocator.boundingBox(),
+        composerLocator.getByRole("button", { name: /^(?:Select model|选择模型)/u }).boundingBox(),
         composerLocator.getByRole("button", { name: /^(?:Send message|发送消息)$/u }).boundingBox()
       ]);
       if (compactBoxes.some((box) => box === null)) throw new Error("Compact three-column layout lost a required column.");
-      const [compactTree, compactEditor, compactChat, compactComposer, compactSend] = compactBoxes as Exclude<(typeof compactBoxes)[number], null>[];
+      const [compactTree, compactEditor, compactChat, compactComposer, compactModel, compactSend] = compactBoxes as Exclude<(typeof compactBoxes)[number], null>[];
       const compactOrdered = compactTree.x + compactTree.width <= compactEditor.x + 1
         && compactEditor.x + compactEditor.width <= compactChat.x + 1;
-      const compactVisible = [compactTree, compactEditor, compactChat, compactComposer, compactSend]
+      const compactVisible = [compactTree, compactEditor, compactChat, compactComposer, compactModel, compactSend]
         .every((box) => box.x >= -1 && box.x + box.width <= 501);
-      if (!compactOrdered || !compactVisible) {
-        throw new Error(`500px viewport clipped the three-column workbench or Composer: ${JSON.stringify({ compactScroller, compactBoxes })}`);
+      const compactFileTextWidth = await page.locator(`button[data-file-path=${JSON.stringify(compactPath)}]`).evaluate((element) => {
+        const style = getComputedStyle(element);
+        return element.clientWidth - Number.parseFloat(style.paddingLeft) - Number.parseFloat(style.paddingRight);
+      });
+      const compactHeaderWidth = await page.locator(".oh-story-editor-path > strong").evaluate((element) => element.getBoundingClientRect().width);
+      const compactJsonIdWidth = await page.locator(".oh-story-jsonl details > summary > strong").first().evaluate((element) => element.getBoundingClientRect().width);
+      const pageOverflow = await page.evaluate(() => Math.max(document.body.scrollWidth, document.documentElement.scrollWidth) - document.documentElement.clientWidth);
+      if (!compactOrdered || !compactVisible
+        || await scrollerLocator.getAttribute("data-oh-story-layout") !== "compact"
+        || compactFileTextWidth < 32 || compactHeaderWidth < 40 || compactJsonIdWidth < 32 || pageOverflow > 1) {
+        throw new Error(`500px viewport clipped the workbench or made its content unreadable: ${JSON.stringify({ compactScroller, compactBoxes, compactFileTextWidth, compactHeaderWidth, compactJsonIdWidth, pageOverflow })}`);
+      }
+      await page.getByRole("tab", { name: "源码" }).click();
+      const compactSource = page.getByRole("textbox", { name: compactPath });
+      await compactSource.press("End");
+      await compactSource.type(" ");
+      const compactHeaderControls = await page.locator(".oh-story-editor-actions").evaluate((element) => {
+        const editor = element.closest(".oh-story-editor")?.getBoundingClientRect();
+        const tabs = element.querySelector(".oh-story-editor-tabs")?.getBoundingClientRect();
+        const save = element.querySelector(".oh-story-save")?.getBoundingClientRect();
+        return { editor, tabs, save };
+      });
+      if (compactHeaderControls.editor === undefined || compactHeaderControls.tabs === undefined || compactHeaderControls.save === undefined
+        || compactHeaderControls.tabs.right > compactHeaderControls.save.left + 1
+        || compactHeaderControls.tabs.left < compactHeaderControls.editor.left - 1
+        || compactHeaderControls.save.right > compactHeaderControls.editor.right + 1) {
+        throw new Error(`500px dirty editor controls overlapped or escaped the editor: ${JSON.stringify(compactHeaderControls)}`);
       }
       if (pageErrors.length > 0) throw new Error(`Browser module raised errors: ${pageErrors.join("; ")}`);
     } finally {

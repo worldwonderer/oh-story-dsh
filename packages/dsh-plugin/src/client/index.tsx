@@ -2,11 +2,12 @@ import { defineStore, type ClientContext, type PartialAssistant, type RunningToo
 import type {} from "@deepseek-ai/dsh-client-ui-layout/client";
 import type { PropsRenderSlots, PropsRuntime, PropsStore } from "@deepseek-ai/dsh-client-ui-slots";
 import type { ToolCallViewProps } from "@deepseek-ai/dsh-client-ui-tool/client";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import {
   creativeRelativePath,
   fileMutations,
+  latestSettledMutation,
   mutatingCallIds,
   previewMutation,
   streamingAssistant,
@@ -108,6 +109,28 @@ const GROUP_ORDER: Readonly<Record<WorkbenchMode, readonly string[]>> = {
   drama: ["项目", "输入", "项目开发", "设定集", "剧集", "审查", "创作者决策", "交付"]
 };
 
+const WORKBENCH_MODES = ["story", "drama"] as const;
+const EDITOR_MODES = ["preview", "source"] as const;
+
+function handleTabKey<T extends string>(
+  event: ReactKeyboardEvent<HTMLButtonElement>,
+  values: readonly T[],
+  current: T,
+  select: (value: T) => void
+): void {
+  let index: number | undefined;
+  if (event.key === "Home") index = 0;
+  else if (event.key === "End") index = values.length - 1;
+  else if (event.key === "ArrowRight") index = (values.indexOf(current) + 1) % values.length;
+  else if (event.key === "ArrowLeft") index = (values.indexOf(current) - 1 + values.length) % values.length;
+  if (index === undefined) return;
+  event.preventDefault();
+  const value = values[index];
+  if (value === undefined) return;
+  select(value);
+  event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("[role='tab']")[index]?.focus();
+}
+
 function groupForPath(path: string): string {
   return path === "short-drama.json" ? "项目" : path.split("/", 1)[0] ?? "其他";
 }
@@ -158,7 +181,9 @@ function FileTreeNodes({
     if (node.kind === "file") return <button
       type="button"
       key={node.path}
-      style={{ paddingLeft: `${String(14 + depth * 14)}px` }}
+      style={{ "--oh-story-indent": `${String(depth * 14)}px` } as CSSProperties}
+      title={node.path}
+      aria-label={node.path}
       data-file-path={node.path}
       data-agent-target={node.path === activityPath || undefined}
       aria-current={node.path === selected ? "page" : undefined}
@@ -166,7 +191,7 @@ function FileTreeNodes({
     >{node.name}</button>;
     const open = selected?.startsWith(`${node.path}/`) === true || expanded[node.path] === true;
     return <details className="oh-story-file-folder" key={node.path} open={open} onToggle={(event) => { onToggle(node.path, event.currentTarget.open); }}>
-      <summary style={{ paddingLeft: `${String(7 + depth * 14)}px` }}>{node.name}<span>{node.fileCount}</span></summary>
+      <summary style={{ "--oh-story-indent": `${String(depth * 14)}px` } as CSSProperties} title={node.path}>{node.name}<span>{node.fileCount}</span></summary>
       <FileTreeNodes
         nodes={node.children}
         depth={depth + 1}
@@ -213,12 +238,14 @@ function CreativeWorkbench({
   sessionId,
   runningCalls,
   partial,
+  settledMutation,
   useStore,
   actions
 }: {
   readonly sessionId: string;
   readonly runningCalls: readonly RunningToolCall[];
   readonly partial: PartialAssistant | null;
+  readonly settledMutation: string | undefined;
 } & Pick<WorkbenchSlotProps, "useStore" | "actions">) {
   const { workspace, error, loading: workspaceLoading, reload } = useWorkspace(sessionId);
   const activities = useMemo(
@@ -247,6 +274,7 @@ function CreativeWorkbench({
   const navRef = useRef<HTMLElement>(null);
   const activityBases = useRef(new Map<string, { readonly path: string; readonly base: string }>());
   const previousSignals = useRef<ReadonlySet<string>>(new Set());
+  const previousSettledMutation = useRef(settledMutation);
   const saveLocks = useRef(new Set<string>());
   const buffer = selected === undefined ? undefined : buffers[selected];
   const dirty = buffer?.source === "human" && buffer.content !== buffer.saved;
@@ -261,8 +289,41 @@ function CreativeWorkbench({
   const editorMode = useStore((memory) => memory.editorMode);
   const setEditorMode = actions.setEditorMode;
   const modeSelection = useRef(selected);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const editorPositions = useRef(new Map<string, { readonly scrollTop: number; readonly selectionStart: number; readonly selectionEnd: number }>());
+  const editorReady = buffer !== undefined && buffer.missing !== true;
+  const availableModes = useMemo(() => {
+    const value = new Set<WorkbenchMode>();
+    for (const file of workspace?.files ?? []) {
+      const mode = workbenchModeForPath(file.path);
+      if (mode !== undefined) value.add(mode);
+    }
+    return WORKBENCH_MODES.filter((mode) => value.has(mode));
+  }, [workspace?.files]);
+  const showModeTabs = workspace !== undefined && availableModes.length !== 1;
+  const workspaceKind = availableModes.length === 1 ? availableModes[0] : undefined;
 
   useEffect(() => { buffersRef.current = buffers; }, [buffers]);
+
+  const rememberEditorPosition = useCallback((): void => {
+    const element = textareaRef.current;
+    if (element === null || selected === undefined || element.getAttribute("aria-label") !== selected) return;
+    editorPositions.current.set(selected, {
+      scrollTop: element.scrollTop,
+      selectionStart: element.selectionStart,
+      selectionEnd: element.selectionEnd
+    });
+  }, [selected]);
+
+  useLayoutEffect(() => {
+    if (editorMode !== "source" || selected === undefined || !editorReady) return;
+    const element = textareaRef.current;
+    const position = editorPositions.current.get(selected);
+    if (element === null || position === undefined) return;
+    const end = Math.min(position.selectionEnd, element.value.length);
+    element.setSelectionRange(Math.min(position.selectionStart, end), end);
+    element.scrollTop = position.scrollTop;
+  }, [editorMode, editorReady, selected]);
 
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent): void => {
@@ -273,9 +334,7 @@ function CreativeWorkbench({
     return () => { globalThis.removeEventListener("beforeunload", warn); };
   }, []);
 
-  const revealPath = useCallback((path: string): void => {
-    setWorkbench(workbenchModeForPath(path) ?? "story");
-    setSelected(path);
+  const expandPath = useCallback((path: string): void => {
     const segments = path.split("/");
     const ancestors = [groupForPath(path)];
     for (let index = 1; index < segments.length - 1; index += 1) ancestors.push(segments.slice(0, index + 1).join("/"));
@@ -286,16 +345,33 @@ function CreativeWorkbench({
     });
   }, []);
 
-  useEffect(() => {
-    if (workspace === undefined || initializedWorkbench.current) return;
-    const hasStory = workspace.files.some((file) => workbenchModeForPath(file.path) === "story");
-    if (workspace.shortDrama !== null && !hasStory) setWorkbench("drama");
-    initializedWorkbench.current = true;
-  }, [workspace]);
+  const revealPath = useCallback((path: string): void => {
+    rememberEditorPosition();
+    setWorkbench(workbenchModeForPath(path) ?? "story");
+    setSelected(path);
+    expandPath(path);
+  }, [expandPath, rememberEditorPosition]);
+
+  const followAgentPath = useCallback((path: string): void => {
+    expandPath(path);
+    const current = selected === undefined ? undefined : buffersRef.current[selected];
+    const preserveFocusedDraft = path !== selected
+      && current?.source === "human"
+      && current.content !== current.saved
+      && surfaceRef.current?.ownerDocument.activeElement === textareaRef.current;
+    if (preserveFocusedDraft) return;
+    revealPath(path);
+  }, [expandPath, revealPath, selected]);
 
   useEffect(() => {
-    if (activityPath !== undefined) setEditorMode("source");
-  }, [activityPath]);
+    if (workspace === undefined || initializedWorkbench.current) return;
+    if (availableModes.length === 1) setWorkbench(availableModes[0] ?? "story");
+    initializedWorkbench.current = true;
+  }, [availableModes, workspace]);
+
+  useEffect(() => {
+    if (activityPath !== undefined && activityPath === selected) setEditorMode("source");
+  }, [activityPath, selected]);
 
   useEffect(() => {
     if (modeSelection.current === selected) return;
@@ -305,13 +381,13 @@ function CreativeWorkbench({
 
   useEffect(() => {
     if (workspaceLoading) return;
-    if (activityPath !== undefined) { revealPath(activityPath); return; }
+    if (activityPath !== undefined) return;
     if (selected !== undefined && (
       (workspace?.files.some((file) => file.path === selected) ?? false)
       || buffers[selected] !== undefined
     ) && workbenchModeForPath(selected) === workbench) return;
     setSelected(workspace === undefined ? undefined : preferredFile(workspace.files, workbench));
-  }, [activityPath, buffers, revealPath, selected, workbench, workspace, workspaceLoading]);
+  }, [activityPath, buffers, selected, workbench, workspace, workspaceLoading]);
 
   useEffect(() => {
     if (workspace === undefined || workspaceLoading) return;
@@ -385,7 +461,8 @@ function CreativeWorkbench({
 
   useEffect(() => {
     if (normalizedActivities.length === 0) return;
-    for (const { path } of normalizedActivities) revealPath(path);
+    for (const { path } of normalizedActivities) expandPath(path);
+    if (activityPath !== undefined) followAgentPath(activityPath);
     setBuffers((current) => {
       let next = current;
       for (const { activity: currentActivity, path } of normalizedActivities) {
@@ -419,7 +496,7 @@ function CreativeWorkbench({
       }
       return next;
     });
-  }, [normalizedActivities, revealPath]);
+  }, [activityPath, expandPath, followAgentPath, normalizedActivities]);
 
   useEffect(() => {
     const signals = new Set(mutatingCallIds(runningCalls));
@@ -432,6 +509,14 @@ function CreativeWorkbench({
     if (!settled) return;
     reload();
   }, [normalizedActivities, reload, runningCalls]);
+
+  useEffect(() => {
+    if (settledMutation === undefined || settledMutation === previousSettledMutation.current) return;
+    previousSettledMutation.current = settledMutation;
+    const path = creativeRelativePath(settledMutation.slice(settledMutation.indexOf("\0") + 1), workspace?.cwd);
+    if (path !== undefined) followAgentPath(path);
+    reload();
+  }, [followAgentPath, reload, settledMutation, workspace?.cwd]);
 
   useEffect(() => {
     if (selected === undefined) return;
@@ -577,6 +662,12 @@ function CreativeWorkbench({
     if (target === undefined) setSelected(undefined);
     else revealPath(target);
   };
+  const selectEditorMode = (next: WorkbenchMemory["editorMode"]): void => {
+    if (next === "preview") rememberEditorPosition();
+    setEditorMode(next);
+  };
+  const selectedLabel = selected ?? `在当前 DSH workspace 中选择${workbench === "story" ? "小说" : "短剧"}文件`;
+  const selectedBasename = selected?.split("/").at(-1) ?? selectedLabel;
   const selectedGroup = selected === undefined ? undefined : groupForPath(selected);
   const toggleGroup = (key: string, open: boolean): void => {
     setExpanded((current) => ({ ...current, [key]: open }));
@@ -601,13 +692,20 @@ function CreativeWorkbench({
     <style>{styles}</style>
     <aside className="oh-story-tree">
       <div className="oh-story-brand">
-        <span>✦ Oh Story</span>
-        <button type="button" onClick={reload} title="刷新">↻</button>
+        <span className="oh-story-brand-cluster"><strong>✦ <span>Oh Story</span></strong>{workspaceKind !== undefined && <span className="oh-story-kind">{workspaceKind === "story" ? "小说" : "短剧"}</span>}</span>
+        <button type="button" onClick={reload} title="刷新" aria-label="刷新项目文件">↻</button>
       </div>
-      <div className="oh-story-mode-tabs" role="tablist" aria-label="创作工作台">
-        <button type="button" role="tab" aria-selected={workbench === "story"} onClick={() => { selectWorkbench("story"); }}>小说</button>
-        <button type="button" role="tab" aria-selected={workbench === "drama"} onClick={() => { selectWorkbench("drama"); }}>短剧</button>
-      </div>
+      {showModeTabs && <div className="oh-story-mode-tabs" role="tablist" aria-label="创作工作台">
+        {WORKBENCH_MODES.map((mode) => <button
+          type="button"
+          role="tab"
+          key={mode}
+          tabIndex={workbench === mode ? 0 : -1}
+          aria-selected={workbench === mode}
+          onKeyDown={(event) => { handleTabKey(event, WORKBENCH_MODES, workbench, selectWorkbench); }}
+          onClick={() => { selectWorkbench(mode); }}
+        >{mode === "story" ? "小说" : "短剧"}</button>)}
+      </div>}
       {error !== undefined && <div className="oh-story-error">{error}</div>}
       {workspace?.metadataErrors.map((message) => <div className="oh-story-warning" key={message}>{message}</div>)}
       <nav ref={navRef} aria-label={workbench === "story" ? "小说项目文件" : "短剧项目文件"}>
@@ -630,11 +728,18 @@ function CreativeWorkbench({
     </aside>
     <main className="oh-story-editor">
       <header>
-        <span title={selected}>{selected ?? `在当前 DSH workspace 中选择${workbench === "story" ? "小说" : "短剧"}文件`}</span>
+        <span className="oh-story-editor-path" title={selected}><span>{selectedLabel}</span><strong>{selectedBasename}</strong></span>
         <div className="oh-story-editor-actions">
           {previewable && <div className="oh-story-editor-tabs" role="tablist" aria-label={markdown ? "Markdown 查看方式" : "JSONL 查看方式"}>
-            <button type="button" role="tab" aria-selected={editorMode === "preview"} onClick={() => { setEditorMode("preview"); }}>预览</button>
-            <button type="button" role="tab" aria-selected={editorMode === "source"} onClick={() => { setEditorMode("source"); }}>源码</button>
+            {EDITOR_MODES.map((mode) => <button
+              type="button"
+              role="tab"
+              key={mode}
+              tabIndex={editorMode === mode ? 0 : -1}
+              aria-selected={editorMode === mode}
+              onKeyDown={(event) => { handleTabKey(event, EDITOR_MODES, editorMode, selectEditorMode); }}
+              onClick={() => { selectEditorMode(mode); }}
+            >{mode === "preview" ? "预览" : "源码"}</button>)}
           </div>}
           {(dirty || saving) && selected !== undefined && <button className="oh-story-save" type="button" disabled={saving || buffer?.missing === true} onClick={() => { void savePath(selected); }}>
             {saving ? "保存中…" : "保存"}
@@ -670,8 +775,12 @@ function CreativeWorkbench({
             ? <MarkdownPreview content={buffer.content} label={selected} />
             : <JsonlPreview content={buffer.content} label={selected} />
           : <textarea
+            ref={textareaRef}
             value={buffer.content}
             data-format={structured ? "structured" : "prose"}
+            onBlur={rememberEditorPosition}
+            onScroll={rememberEditorPosition}
+            onSelect={rememberEditorPosition}
             onChange={(event) => {
               const content = event.target.value;
               setBuffers((current) => ({
@@ -701,6 +810,7 @@ function CreativeSplitBridge({ sessionId, useSession, useStore, actions }: Workb
   const [target, setTarget] = useState<HTMLElement>();
   const runningCalls = useSession((snapshot) => snapshot.runningCalls);
   const partial = useSession((snapshot) => streamingAssistant(snapshot.chat.timeline));
+  const settledMutation = useSession((snapshot) => latestSettledMutation(snapshot.chat));
   useLayoutEffect(() => {
     const document = marker.current?.ownerDocument;
     if (document === undefined) return;
@@ -716,15 +826,18 @@ function CreativeSplitBridge({ sessionId, useSession, useStore, actions }: Workb
   useLayoutEffect(() => {
     const scroller = target?.parentElement;
     if (scroller === undefined || scroller === null) return;
-    const publishHeight = (): void => {
+    const publishLayout = (): void => {
       scroller.style.setProperty("--oh-story-scroll-height", `${String(scroller.clientHeight)}px`);
+      const layout = scroller.clientWidth < 620 ? "compact" : scroller.clientWidth < 900 ? "medium" : "wide";
+      if (scroller.dataset.ohStoryLayout !== layout) scroller.dataset.ohStoryLayout = layout;
     };
-    publishHeight();
-    const observer = new ResizeObserver(publishHeight);
+    publishLayout();
+    const observer = new ResizeObserver(publishLayout);
     observer.observe(scroller);
     return () => {
       observer.disconnect();
       scroller.style.removeProperty("--oh-story-scroll-height");
+      delete scroller.dataset.ohStoryLayout;
     };
   }, [target]);
   return <>
@@ -733,6 +846,7 @@ function CreativeSplitBridge({ sessionId, useSession, useStore, actions }: Workb
       sessionId={sessionId}
       runningCalls={runningCalls}
       partial={partial}
+      settledMutation={settledMutation}
       useStore={useStore}
       actions={actions}
     />, target)}
