@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-08-21
+
 ### Changed
 
 - 文件生成预览改用 DSH Session 的 Step location data、`runningCalls` 与已落地 Tool diff，移除重复的 Host Projection。
@@ -46,6 +48,7 @@
 - 提供 13 个 Oh Story 小说 Skills、7 个专业 Roles 与 10 个 Drama Skills。
 - 提供文件树、Markdown/JSONL 编辑预览与官方 DSH Chat 同屏的三栏工作台。
 
-[Unreleased]: https://github.com/worldwonderer/oh-story-dsh/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/worldwonderer/oh-story-dsh/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/worldwonderer/oh-story-dsh/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/worldwonderer/oh-story-dsh/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/worldwonderer/oh-story-dsh/releases/tag/v0.1.0

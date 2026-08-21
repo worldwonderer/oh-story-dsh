@@ -32,7 +32,7 @@ The paid real-provider layer is intentionally excluded from Pull Request CI. It 
 | Roles and hooks | Tests cover Role catalog, DSH child-Agent invocation and novel mutation guards |
 | Package contents | Build and pack include both pinned knowledge sets, package metadata and license while omitting source tests and the standalone Drama Dashboard |
 
-Current deterministic result: 9 test files and 33 tests passing.
+Current deterministic result: 9 test files and 34 tests passing.
 
 ## Native DSH Web audit
 
@@ -53,8 +53,8 @@ The same audited surface generates the README demos through `pnpm demo` (both), 
 
 The release test used `deepseek-official/deepseek-v4-flash` against the packed plugin:
 
-- `story-review` completed with 3 `oh_story_role` calls and 18,901 durable Session events;
-- `short-drama-review` completed with 7,499 durable Session events;
+- `story-review` completed with 4 `oh_story_role` calls and 14,051 durable Session events;
+- `short-drama-review` completed with 11,728 durable Session events;
 - both sessions produced durable assistant output;
 - the combined fiction/short-drama project digest remained unchanged;
 - the API credential did not appear in captured DSH logs.
@@ -65,7 +65,7 @@ Event totals are observations, not fixed assertions.
 
 - `.github/workflows/ci.yml`: Ubuntu quality gate, macOS/Windows portability, then packaged DSH Web integration.
 - `.github/workflows/real-provider.yml`: manual paid real-provider test; cleanly skips when the Secret is absent.
-- `.github/workflows/release.yml`: tag/manual release candidate gate and `.tgz` artifact upload; npm publication remains an explicit external action.
+- `.github/workflows/release.yml`: tagged release gate, `.tgz` artifact upload, GitHub Release creation and npm publication with provenance.
 
 ## Commands
 

@@ -47,14 +47,14 @@
 **1. 安装插件并启动 DSH Web**
 
 ```bash
-npx -y @deepseek-ai/dsh@0.1.1-rc.1 plugin --profile web add @oh-story/dsh@0.1.1
+npx -y @deepseek-ai/dsh@0.1.1-rc.1 plugin --profile web add @oh-story/dsh@0.1.2
 npx -y @deepseek-ai/dsh@0.1.1-rc.1 web
 ```
 
 也可以直接安装 GitHub Release 中经过同一套测试的预构建包：
 
 ```bash
-npx -y @deepseek-ai/dsh@0.1.1-rc.1 plugin --profile web add https://github.com/worldwonderer/oh-story-dsh/releases/download/v0.1.1/oh-story-dsh-0.1.1.tgz
+npx -y @deepseek-ai/dsh@0.1.1-rc.1 plugin --profile web add https://github.com/worldwonderer/oh-story-dsh/releases/download/v0.1.2/oh-story-dsh-0.1.2.tgz
 npx -y @deepseek-ai/dsh@0.1.1-rc.1 web
 ```
 

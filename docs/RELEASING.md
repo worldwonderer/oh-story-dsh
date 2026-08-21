@@ -43,7 +43,7 @@ safely re-run.
 Do not announce a release until the registry reports the exact version:
 
 ```bash
-VERSION=0.1.1
+VERSION=0.1.2
 npm view "@oh-story/dsh@$VERSION" version dist.integrity
 npx -y @deepseek-ai/dsh@0.1.1-rc.1 plugin --profile web add "@oh-story/dsh@$VERSION"
 ```
