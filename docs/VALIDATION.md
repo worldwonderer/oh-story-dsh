@@ -32,18 +32,20 @@ The paid real-provider layer is intentionally excluded from Pull Request CI. It 
 | Roles and hooks | Tests cover Role catalog, DSH child-Agent invocation and novel mutation guards |
 | Package contents | Build and pack include both pinned knowledge sets, package metadata and license while omitting source tests and the standalone Drama Dashboard |
 
-Current deterministic result: 11 test files and 32 tests passing.
+Current deterministic result: 10 test files and 33 tests passing.
 
 ## Native DSH Web audit
 
 `pnpm test:dsh` creates an isolated DSH installation and profile, packs `@oh-story/dsh`, installs the tarball through `dsh plugin --profile web add`, and starts the official Web UI. It copies the pinned public demo projects from Oh Story (`让你管账号，你高燃混剪炸全网`) and Drama Skills (`善意不结账`) into temporary workspaces; their source repositories, commits and paths are recorded in `scripts/demo-fixtures/sources.json`. The Chrome pass verifies:
 
 - 13 Oh Story Skills and 10 Drama Skills in the Session catalog;
-- Session-scoped workspace reads, stale-write rejection and path-traversal rejection;
+- Session-scoped workspace reads, a 20-writer atomic CAS race, stale-write rejection and path-traversal rejection;
+- invalid project metadata isolation without taking down the workspace;
 - published Browser module and official UI slot registrations;
+- a real DSH Agent `write` tool call, incremental editor content, authoritative disk reconciliation and official tool-file navigation;
 - 小说/短剧 navigation, recursive project directories, Markdown structure and JSONL structured rendering;
-- source editing, saved-state behavior and no duplicate Agent activity UI;
-- ordered tree/editor/Chat geometry and a Composer that remains fixed during long-message scrolling.
+- blank-session mounting, Session-switch draft recovery, source editing, conflict isolation and saved-state behavior;
+- ordered tree/editor/Chat geometry at desktop and 500 px widths, plus a Composer that remains fixed during long-message scrolling.
 
 The same audited surface generates the README demos through `pnpm demo` (both), `pnpm demo:story`, or `pnpm demo:drama`. Demo commands require `DEEPSEEK_API_KEY`, use the real `deepseek-official` provider, wait for successful assistant turns, collapse the DSH navigation rail, and record the complete tree/editor/Chat surface. The API key is process-only and is redacted from captured failure logs.
 

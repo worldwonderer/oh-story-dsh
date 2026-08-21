@@ -1,11 +1,11 @@
-import type { AssistantBlock, RunningToolCall } from "@deepseek-ai/dsh-client-runtime/client";
+import type { RunningToolCall } from "@deepseek-ai/dsh-client-runtime/client";
 import { describe, expect, it } from "vitest";
 import {
-  activeFileMutation,
   creativeRelativePath,
+  fileMutations,
   jsonStringPrefix,
+  mutatingCallIds,
   previewMutation,
-  storyRelativePath,
   workbenchModeForPath
 } from "../src/client/file-activity.js";
 
@@ -18,13 +18,12 @@ describe("official DSH file activity projection", () => {
   });
 
   it("projects a streaming write call before tool execution starts", () => {
-    const blocks: AssistantBlock[] = [{
-      kind: "tool-call",
+    const activity = fileMutations([], [{
+      slot: "1:1:0",
       callId: "write-1",
       name: "write",
       argsRaw: '{"file_path":"正文/第011章.md","content":"第一行\\n第二'
-    }];
-    const activity = activeFileMutation(blocks, []);
+    }]).at(-1);
     expect(activity).toMatchObject({
       callId: "write-1",
       stage: "streaming",
@@ -46,17 +45,69 @@ describe("official DSH file activity projection", () => {
       callView: null,
       subCalls: []
     }] as RunningToolCall[];
-    const activity = activeFileMutation([], running);
+    const activity = fileMutations(running).at(-1);
     expect(activity).toMatchObject({ stage: "running", oldText: "旧句", newText: "新句正在生成" });
     expect(previewMutation(activity!, "开头。旧句。结尾。")).toBe("开头。新句正在生成。结尾。");
   });
 
+  it("walks nested calls and preserves concurrent mutations", () => {
+    const child = (callId: string, path: string): RunningToolCall => ({
+      callId,
+      name: "write",
+      argsRaw: JSON.stringify({ file_path: path, content: callId }),
+      turn: 1,
+      step: 1,
+      time: 1,
+      callView: null,
+      subCalls: []
+    });
+    const running: RunningToolCall[] = [{
+      callId: "code-1",
+      name: "run_code",
+      argsRaw: "{}",
+      turn: 1,
+      step: 1,
+      time: 1,
+      callView: null,
+      subCalls: [child("write-a", "正文/A.md"), child("write-b", "正文/B.md")]
+    }];
+    expect(fileMutations(running).map((value) => value.path)).toEqual(["正文/A.md", "正文/B.md"]);
+    expect([...mutatingCallIds(running)]).toEqual(["code-1", "write-a", "write-b"]);
+  });
+
+  it("uses official diff views and supports replace-all and deletion", () => {
+    const replaceAll = fileMutations([{
+      callId: "edit-all",
+      name: "edit",
+      argsRaw: '{"file_path":"正文/A.md","old_string":"旧","new_string":"新","replace_all":true}',
+      turn: 1,
+      step: 1,
+      time: 1,
+      callView: { card: "diff", title: "Edit", diffs: [{ path: "正文/A.md", oldText: "旧", newText: "新" }] },
+      subCalls: []
+    }]).at(-1);
+    expect(previewMutation(replaceAll!, "旧/旧")).toBe("新/新");
+
+    const deletion = fileMutations([{
+      callId: "delete-text",
+      name: "str_replace_editor",
+      argsRaw: '{"command":"str_replace","path":"正文/A.md","old_str":"删掉"}',
+      turn: 1,
+      step: 1,
+      time: 1,
+      callView: null,
+      subCalls: []
+    }]).at(-1);
+    expect(previewMutation(deletion!, "保留删掉结尾")).toBe("保留结尾");
+  });
+
   it("accepts only editable story paths inside the current DSH workspace", () => {
     const cwd = "/books/demo";
-    expect(storyRelativePath("/books/demo/正文/第003章.md", cwd)).toBe("正文/第003章.md");
-    expect(storyRelativePath("设定/人物.json", cwd)).toBe("设定/人物.json");
-    expect(storyRelativePath("/books/demo/src/app.ts", cwd)).toBeUndefined();
-    expect(storyRelativePath("../正文/逃逸.md", cwd)).toBeUndefined();
+    expect(creativeRelativePath("/books/demo/正文/第003章.md", cwd)).toBe("正文/第003章.md");
+    expect(creativeRelativePath("设定/人物.json", cwd)).toBe("设定/人物.json");
+    expect(creativeRelativePath("/books/demo/src/app.ts", cwd)).toBeUndefined();
+    expect(creativeRelativePath("/正文/越界.md", cwd)).toBeUndefined();
+    expect(creativeRelativePath("../正文/逃逸.md", cwd)).toBeUndefined();
   });
 
   it("recognizes short-drama files and chooses the matching workbench", () => {

@@ -1,4 +1,5 @@
-import type { AssistantBlock, RunningToolCall } from "@deepseek-ai/dsh-client-runtime/client";
+import type { RunningToolCall, ToolCallBlock } from "@deepseek-ai/dsh-client-runtime/client";
+import type { ProjectedFileCall } from "../file-activity-projection-types.js";
 
 export type MutationToolName = "write" | "edit" | "str_replace_editor";
 
@@ -11,6 +12,7 @@ export interface FileMutationActivity {
   readonly operation: "replace-file" | "replace-text" | "insert-text" | undefined;
   readonly oldText: string | undefined;
   readonly newText: string | undefined;
+  readonly replaceAll: boolean;
 }
 
 interface JsonStringPrefix {
@@ -23,6 +25,7 @@ export type WorkbenchMode = "story" | "drama";
 const STORY_DIRECTORIES = new Set(["正文", "大纲", "设定", "追踪", "对标", "参考资料"]);
 const DRAMA_DIRECTORIES = new Set(["输入", "项目开发", "设定集", "剧集", "交付", "创作者决策", "审查"]);
 const EDITABLE_EXTENSION = /\.(?:md|txt|json|jsonl)$/iu;
+const MUTATING_CALLS = new Set(["write", "edit", "str_replace_editor", "bash", "run_code", "oh_story_role"]);
 
 function decodeEscape(character: string): string | undefined {
   switch (character) {
@@ -69,14 +72,23 @@ function completedString(raw: string, key: string): string | undefined {
   return value?.complete === true ? value.value : undefined;
 }
 
-function mutation(name: string, callId: string, argsRaw: string, stage: FileMutationActivity["stage"]): FileMutationActivity | undefined {
+function parsedArgs(raw: string): Record<string, unknown> | undefined {
+  try {
+    const value = JSON.parse(raw) as unknown;
+    return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+  } catch { return undefined; }
+}
+
+function mutationFromArgs(name: string, callId: string, argsRaw: string, stage: FileMutationActivity["stage"]): FileMutationActivity | undefined {
+  const complete = parsedArgs(argsRaw);
   if (name === "write") {
     return {
       callId, name, argsRaw, stage,
       path: jsonStringPrefix(argsRaw, "file_path")?.value,
       operation: "replace-file",
       oldText: undefined,
-      newText: jsonStringPrefix(argsRaw, "content")?.value
+      newText: jsonStringPrefix(argsRaw, "content")?.value,
+      replaceAll: false
     };
   }
   if (name === "edit") {
@@ -85,7 +97,8 @@ function mutation(name: string, callId: string, argsRaw: string, stage: FileMuta
       path: jsonStringPrefix(argsRaw, "file_path")?.value,
       operation: "replace-text",
       oldText: completedString(argsRaw, "old_string"),
-      newText: jsonStringPrefix(argsRaw, "new_string")?.value
+      newText: jsonStringPrefix(argsRaw, "new_string")?.value,
+      replaceAll: complete?.replace_all === true
     };
   }
   if (name !== "str_replace_editor") return undefined;
@@ -97,7 +110,8 @@ function mutation(name: string, callId: string, argsRaw: string, stage: FileMuta
       callId, name, argsRaw, stage, path,
       operation: "replace-file",
       oldText: undefined,
-      newText: jsonStringPrefix(argsRaw, "file_text")?.value
+      newText: jsonStringPrefix(argsRaw, "file_text")?.value,
+      replaceAll: false
     };
   }
   if (command === "str_replace") {
@@ -105,7 +119,8 @@ function mutation(name: string, callId: string, argsRaw: string, stage: FileMuta
       callId, name, argsRaw, stage, path,
       operation: "replace-text",
       oldText: completedString(argsRaw, "old_str"),
-      newText: jsonStringPrefix(argsRaw, "new_str")?.value
+      newText: jsonStringPrefix(argsRaw, "new_str")?.value ?? (complete !== undefined ? "" : undefined),
+      replaceAll: complete?.replace_all === true
     };
   }
   if (command === "insert") {
@@ -113,32 +128,54 @@ function mutation(name: string, callId: string, argsRaw: string, stage: FileMuta
       callId, name, argsRaw, stage, path,
       operation: "insert-text",
       oldText: undefined,
-      newText: jsonStringPrefix(argsRaw, "new_str")?.value
+      newText: jsonStringPrefix(argsRaw, "new_str")?.value,
+      replaceAll: false
     };
   }
-  // The command field itself may still be streaming. Returning the path lets
-  // the tree focus as soon as enough arguments have arrived.
-  return { callId, name, argsRaw, stage, path, operation: undefined, oldText: undefined, newText: undefined };
+  return { callId, name, argsRaw, stage, path, operation: undefined, oldText: undefined, newText: undefined, replaceAll: false };
 }
 
-/** Prefer an executing call over the latest streamed tool-call block. */
-export function activeFileMutation(
-  partialBlocks: readonly AssistantBlock[],
-  runningCalls: readonly RunningToolCall[]
-): FileMutationActivity | undefined {
-  for (let index = runningCalls.length - 1; index >= 0; index -= 1) {
-    const call = runningCalls[index];
-    if (call === undefined) continue;
-    const value = mutation(call.name, call.callId, call.argsRaw, "running");
-    if (value !== undefined) return value;
+function mutationsFromRunning(call: RunningToolCall): FileMutationActivity[] {
+  const direct = mutationFromArgs(call.name, call.callId, call.argsRaw, "running");
+  if (direct === undefined) return [];
+  const view = call.callView;
+  if (view?.card !== "diff" || view.diffs.length === 0) return [direct];
+  return view.diffs.map((diff, index) => ({
+    ...direct,
+    callId: view.diffs.length === 1 ? call.callId : `${call.callId}:${String(index)}`,
+    path: diff.path,
+    operation: diff.oldText === null ? "replace-file" : "replace-text",
+    oldText: diff.oldText ?? undefined,
+    newText: diff.newText
+  }));
+}
+
+function visitRunning(blocks: readonly ToolCallBlock[], visit: (call: RunningToolCall) => void): void {
+  for (const block of blocks) {
+    if (!("kind" in block)) visit(block);
+    visitRunning(block.subCalls, visit);
   }
-  for (let index = partialBlocks.length - 1; index >= 0; index -= 1) {
-    const block = partialBlocks[index];
-    if (block?.kind !== "tool-call") continue;
-    const value = mutation(block.name, block.callId, block.argsRaw, "streaming");
-    if (value !== undefined) return value;
+}
+
+/** Return every active file mutation in official DSH dispatch order, including nested Code Mode calls. */
+export function fileMutations(
+  runningCalls: readonly RunningToolCall[],
+  projectedCalls: readonly ProjectedFileCall[] = []
+): FileMutationActivity[] {
+  const values: FileMutationActivity[] = [];
+  visitRunning(runningCalls, (call) => { values.push(...mutationsFromRunning(call)); });
+  for (const call of projectedCalls) {
+    const value = mutationFromArgs(call.name, call.callId, call.argsRaw, "streaming");
+    if (value !== undefined && !values.some((candidate) => candidate.callId === value.callId)) values.push(value);
   }
-  return undefined;
+  return values;
+}
+
+/** Running calls whose settlement may have changed creative files. */
+export function mutatingCallIds(runningCalls: readonly RunningToolCall[]): ReadonlySet<string> {
+  const ids = new Set<string>();
+  visitRunning(runningCalls, (call) => { if (MUTATING_CALLS.has(call.name)) ids.add(call.callId); });
+  return ids;
 }
 
 /** Convert a DSH tool path to the creative-relative path accepted by the narrow route. */
@@ -146,13 +183,13 @@ export function creativeRelativePath(path: string | undefined, cwd: string | und
   if (path === undefined || path === "") return undefined;
   const normalized = path.replaceAll("\\", "/");
   const root = cwd?.replaceAll("\\", "/").replace(/\/$/u, "");
-  const relative = root !== undefined && normalized.startsWith(`${root}/`)
-    ? normalized.slice(root.length + 1)
-    : normalized.replace(/^\.\//u, "").replace(/^\//u, "");
+  const insideRoot = root !== undefined && normalized.startsWith(`${root}/`);
+  if ((normalized.startsWith("/") || /^[a-z]:\//iu.test(normalized) || normalized.startsWith("file:")) && !insideRoot) return undefined;
+  const relative = insideRoot ? normalized.slice(root.length + 1) : normalized.replace(/^\.\//u, "");
   const [directory] = relative.split("/", 1);
   const creative = directory !== undefined && (STORY_DIRECTORIES.has(directory) || DRAMA_DIRECTORIES.has(directory));
   if ((!creative && relative !== "short-drama.json") || !EDITABLE_EXTENSION.test(relative)) return undefined;
-  if (relative.split("/").some((part) => part === ".." || part === "")) return undefined;
+  if (relative.split("/").some((part) => part === ".." || part === "." || part === "")) return undefined;
   return relative;
 }
 
@@ -164,17 +201,12 @@ export function workbenchModeForPath(path: string | undefined): WorkbenchMode | 
   return undefined;
 }
 
-/** Compatibility alias for consumers that only accept novel files. */
-export function storyRelativePath(path: string | undefined, cwd: string | undefined): string | undefined {
-  const relative = creativeRelativePath(path, cwd);
-  return workbenchModeForPath(relative) === "story" ? relative : undefined;
-}
-
-/** Project a streamed mutation over the last authoritative disk content. */
+/** Project one streamed mutation over its immediate predecessor. */
 export function previewMutation(activity: FileMutationActivity, base: string): string | undefined {
   if (activity.operation === "replace-file") return activity.newText;
   if (activity.operation === "replace-text") {
-    if (activity.oldText === undefined || activity.newText === undefined) return undefined;
+    if (activity.oldText === undefined || activity.newText === undefined || activity.oldText === "") return undefined;
+    if (activity.replaceAll) return base.includes(activity.oldText) ? base.split(activity.oldText).join(activity.newText) : undefined;
     const at = base.indexOf(activity.oldText);
     return at < 0 ? undefined : `${base.slice(0, at)}${activity.newText}${base.slice(at + activity.oldText.length)}`;
   }

@@ -1,6 +1,7 @@
 import type { Context } from "@deepseek-ai/cordis";
 import type {} from "@deepseek-ai/dsh-host-webserver";
 import type {} from "@deepseek-ai/dsh-session";
+import type {} from "@deepseek-ai/dsh-session-projection";
 import type {} from "@deepseek-ai/dsh-skill";
 import type {} from "@deepseek-ai/dsh-subagent";
 import type {} from "@deepseek-ai/dsh-tools";
@@ -10,6 +11,7 @@ import { registerOhStoryHooks } from "./native-hooks.js";
 import { registerOhStoryRoleTool } from "./role-tool.js";
 import { registerWorkspaceRoute } from "./workspace-route.js";
 import { assertTrustedWorkspaceAuthority } from "./workspace-request-trust.js";
+import { fileActivityProjectionDefinition } from "./file-activity-projection.js";
 
 export { createDramaSkillProvider, createOhStorySkillProvider, parseBundledSkill } from "./skill-provider.js";
 export { OH_STORY_ROLE_NAMES, loadBundledRole } from "./role-provider.js";
@@ -18,7 +20,7 @@ export { registerWorkspaceRoute } from "./workspace-route.js";
 export { registerOhStoryHooks } from "./native-hooks.js";
 
 export const name = "oh-story";
-export const inject = ["sessions", "skills", "subagents", "tools", "webServer"];
+export const inject = ["fs", "sandboxPolicy", "sessionProjections", "sessions", "skills", "subagents", "tools", "typert", "webServer"];
 
 /** DSH owns models, providers, presets, permissions, roots, runs, and sessions. */
 export interface Config {
@@ -37,6 +39,7 @@ export async function apply(context: Context, config: Config = {}): Promise<void
   for (const entry of trustedHosts) assertTrustedWorkspaceAuthority(entry);
   context.skills.registerProvider(() => createOhStorySkillProvider());
   context.skills.registerProvider(() => createDramaSkillProvider());
+  context.sessionProjections.register(fileActivityProjectionDefinition);
   registerOhStoryHooks(context);
   await registerOhStoryRoleTool(context);
   registerWorkspaceRoute(context, { maxBytes: config.editorMaxBytes ?? 2_097_152, trustedHosts });

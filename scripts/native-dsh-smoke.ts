@@ -19,6 +19,10 @@ const storyPrompt = `请只读检查《${storyProjectName}》当前工程，简�
 const dramaPrompt = `请只读检查短剧《${dramaProjectName}》当前工程，简要概览项目开发、剧本、设定集、分镜与审查状态，不修改任何文件。`;
 const storyReply = `已读取《${storyProjectName}》工程。正文、大纲、设定与追踪文件已就绪。`;
 const dramaReply = `已读取《${dramaProjectName}》工程。项目开发、8 集剧本、设定集、分镜与审查产物已就绪。`;
+const agentMutationPrompt = "AGENT_WRITE_SMOKE：请使用 write 工具创建指定测试文件。";
+const agentMutationPath = "设定/角色/_agent-write-smoke.md";
+const agentMutationContent = "# Agent 写入验证\n\n这段正文由真实 DSH Agent 工具调用流式写入。\n\n- 文件树自动定位\n- 编辑器同步更新\n";
+const agentMutationReply = "测试文件已通过 write 工具创建。";
 
 async function captureDemoFrame(page: Page, workbench: "story" | "drama", index: number): Promise<void> {
   if (demoFramesDirectory === undefined) return;
@@ -62,7 +66,7 @@ async function startMockDeepSeek(): Promise<MockDeepSeek> {
   const server = createHttpServer((request, response) => {
     let body = "";
     request.on("data", (chunk: Buffer) => { body += chunk.toString("utf8"); });
-    request.on("end", () => {
+    request.on("end", async () => {
       if (request.method !== "POST" || !request.url?.endsWith("/chat/completions")) {
         response.writeHead(404).end("not found");
         return;
@@ -74,19 +78,41 @@ async function startMockDeepSeek(): Promise<MockDeepSeek> {
         return;
       }
       const serialized = JSON.stringify(payload);
-      const content = serialized.includes(dramaProjectName) ? dramaReply : storyReply;
-      const events = [
-        JSON.stringify({ choices: [{ delta: { role: "assistant", content: null, reasoning_content: "" } }] }),
-        JSON.stringify({ choices: [{ delta: { content } }] }),
-        JSON.stringify({ choices: [{ delta: { content: "" }, finish_reason: "stop" }], usage: { prompt_tokens: 12, completion_tokens: 20 } }),
-        "[DONE]"
-      ];
+      const messages = (payload as { readonly messages?: readonly { readonly role?: string }[] }).messages ?? [];
+      const mutationTurn = serialized.includes(agentMutationPrompt);
+      const hasToolResult = messages.some((message) => message.role === "tool");
+      let events: string[];
+      if (mutationTurn && !hasToolResult) {
+        const argumentsJson = JSON.stringify({ file_path: agentMutationPath, content: agentMutationContent });
+        const chunks = argumentsJson.match(/.{1,14}/gu) ?? [argumentsJson];
+        events = [
+          JSON.stringify({ choices: [{ delta: { role: "assistant", content: null, reasoning_content: "" } }] }),
+          ...chunks.map((argumentsDelta, index) => JSON.stringify({ choices: [{ delta: { tool_calls: [{
+            index: 0,
+            ...(index === 0 ? { id: "call_oh_story_write_smoke", type: "function" } : {}),
+            function: { ...(index === 0 ? { name: "write" } : {}), arguments: argumentsDelta }
+          }] } }] })),
+          JSON.stringify({ choices: [{ delta: { content: "" }, finish_reason: "tool_calls" }], usage: { prompt_tokens: 12, completion_tokens: 20 } }),
+          "[DONE]"
+        ];
+      } else {
+        const content = mutationTurn ? agentMutationReply : serialized.includes(dramaProjectName) ? dramaReply : storyReply;
+        events = [
+          JSON.stringify({ choices: [{ delta: { role: "assistant", content: null, reasoning_content: "" } }] }),
+          JSON.stringify({ choices: [{ delta: { content } }] }),
+          JSON.stringify({ choices: [{ delta: { content: "" }, finish_reason: "stop" }], usage: { prompt_tokens: 12, completion_tokens: 20 } }),
+          "[DONE]"
+        ];
+      }
       response.writeHead(200, {
         "cache-control": "no-cache",
         "content-type": "text/event-stream",
         connection: "keep-alive"
       });
-      for (const event of events) response.write(`data: ${event}\n\n`);
+      for (const event of events) {
+        response.write(`data: ${event}\n\n`);
+        if (mutationTurn && !hasToolResult) await new Promise((accept) => setTimeout(accept, 180));
+      }
       response.end();
     });
   });
@@ -354,9 +380,56 @@ async function main(): Promise<void> {
       body: JSON.stringify({ content: chapter.content, baseVersion: chapter.version })
     });
     const unchanged = await unchangedWrite.json() as { readonly version?: string };
-    if (!unchangedWrite.ok || unchanged.version !== chapter.version) {
+    if (!unchangedWrite.ok || unchanged.version === undefined) {
       throw new Error(`Workspace optimistic save failed: ${JSON.stringify(unchanged)}`);
     }
+    const candidates = Array.from({ length: 20 }, (_, index) => `${chapter.content}\n<!-- atomic-${String(index)} -->\n`);
+    const concurrent = await Promise.all(candidates.map((content) => fetch(chapterUrl, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ content, baseVersion: unchanged.version })
+    })));
+    const winnerCount = concurrent.filter((response) => response.ok).length;
+    const staleCount = concurrent.filter((response) => response.status === 412).length;
+    if (winnerCount !== 1 || staleCount !== candidates.length - 1) {
+      throw new Error(`Workspace CAS was not atomic: ${JSON.stringify(concurrent.map((response) => response.status))}`);
+    }
+    const afterRaceResponse = await fetch(chapterUrl);
+    const afterRace = await afterRaceResponse.json() as { readonly content?: string; readonly version?: string };
+    if (!afterRaceResponse.ok || afterRace.content === undefined || afterRace.version === undefined || !candidates.includes(afterRace.content)) {
+      throw new Error(`Workspace CAS winner was not authoritative: ${JSON.stringify(afterRace)}`);
+    }
+    const restoreChapter = await fetch(chapterUrl, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ content: chapter.content, baseVersion: afterRace.version })
+    });
+    if (!restoreChapter.ok) throw new Error(`Workspace CAS fixture restore failed: ${String(restoreChapter.status)}.`);
+
+    const trackingPath = "追踪/_tracking-state.json";
+    const trackingUrl = `${origin}/oh-story/file?sessionId=${encodeURIComponent(storySession.sessionId)}&path=${encodeURIComponent(trackingPath)}`;
+    const trackingResponse = await fetch(trackingUrl);
+    const tracking = await trackingResponse.json() as { readonly content?: string; readonly version?: string };
+    if (!trackingResponse.ok || tracking.content === undefined || tracking.version === undefined) throw new Error("Tracking fixture was unavailable.");
+    const invalidTrackingResponse = await fetch(trackingUrl, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ content: "{ invalid", baseVersion: tracking.version })
+    });
+    const invalidTracking = await invalidTrackingResponse.json() as { readonly version?: string };
+    if (!invalidTrackingResponse.ok || invalidTracking.version === undefined) throw new Error("Could not stage invalid tracking JSON.");
+    const degradedWorkspaceResponse = await fetch(`${origin}/oh-story/workspace?sessionId=${encodeURIComponent(storySession.sessionId)}`);
+    const degradedWorkspace = await degradedWorkspaceResponse.json() as { readonly files?: readonly unknown[]; readonly metadataErrors?: readonly string[] };
+    if (!degradedWorkspaceResponse.ok || degradedWorkspace.files === undefined
+      || !degradedWorkspace.metadataErrors?.some((message) => message.includes(trackingPath))) {
+      throw new Error(`Invalid metadata still broke the workspace: ${JSON.stringify(degradedWorkspace)}`);
+    }
+    const restoreTracking = await fetch(trackingUrl, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ content: tracking.content, baseVersion: invalidTracking.version })
+    });
+    if (!restoreTracking.ok) throw new Error(`Tracking fixture restore failed: ${String(restoreTracking.status)}.`);
     // The Host/Origin/Fetch-Metadata fence is unit-tested in isolation; assert it
     // against the mounted route so dropping it from the handler cannot pass CI.
     // These go over node:http because fetch refuses to forge a Host header.
@@ -379,10 +452,10 @@ async function main(): Promise<void> {
     const clientPath = index.match(/\/plugins\/[^"']*oh-story[^"']*client\.js[^"']*/u)?.[0];
     if (clientPath === undefined) throw new Error("DSH did not publish the Oh Story Browser module.");
     const client = await (await fetch(new URL(clientPath, origin))).text();
-    for (const slot of ["conversation.session.header.actions", "tool.call.toolview"]) {
+    for (const slot of ["shell.overlay", "tool.call.toolview"]) {
       if (!client.includes(slot)) throw new Error(`Browser module is missing official slot ${slot}.`);
     }
-    for (const forbidden of ["shell.overlay", "EventSource", "FakeRuntimeAdapter"]) {
+    for (const forbidden of ["conversation.session.header.actions", "EventSource", "FakeRuntimeAdapter"]) {
       if (client.includes(forbidden)) throw new Error(`Browser module still contains legacy surface ${forbidden}.`);
     }
 
@@ -401,6 +474,14 @@ async function main(): Promise<void> {
       }
       await page.locator('[class*="onboardingOverlay"]').waitFor({ state: "detached", timeout: 10_000 }).catch(() => undefined);
       await selectSession(page, storyWorkspace.workspace.title, storySessionTitle);
+      const blankSession = page.getByRole("button", { name: /^(?:New session|新会话)$/u }).first();
+      await blankSession.waitFor({ state: "visible", timeout: 10_000 });
+      await blankSession.click();
+      await page.getByRole("navigation", { name: "小说项目文件" }).waitFor({ state: "visible", timeout: 20_000 });
+      if (await page.locator(".oh-story-split-surface").count() !== 1) {
+        throw new Error("Blank DSH Session did not mount the three-column workbench.");
+      }
+      await selectSession(page, storyWorkspace.workspace.title, storySessionTitle);
       const storyTree = page.getByRole("navigation", { name: "小说项目文件" });
       try { await storyTree.waitFor({ state: "visible", timeout: 20_000 }); }
       catch (error) {
@@ -409,8 +490,60 @@ async function main(): Promise<void> {
         throw new Error(`Three-column story surface was not visible; tabs=${JSON.stringify(tabs)}; pageErrors=${JSON.stringify(pageErrors)}; body=${JSON.stringify(body)}`, { cause: error });
       }
       await page.getByText(storyPrompt, { exact: true }).waitFor({ state: "visible", timeout: 10_000 });
-      if (!useRealDeepSeek) await page.getByText(storyReply, { exact: true }).waitFor({ state: "visible", timeout: 10_000 });
+      if (!useRealDeepSeek) await page.getByText(`已读取《${storyProjectName}》工程。`, { exact: false }).waitFor({ state: "visible", timeout: 10_000 });
       if (await page.getByText("This turn failed", { exact: false }).isVisible()) throw new Error("Story Chat contains a failed turn.");
+
+      if (!useRealDeepSeek) {
+        await rpc(origin, "session.prompt", {
+          sessionId: storySession.sessionId,
+          mode: "queue",
+          content: [{ type: "text", text: agentMutationPrompt }]
+        });
+        const streamedEditor = page.getByRole("textbox", { name: agentMutationPath });
+        const streamedValues = new Set<string>();
+        for (let sample = 0; sample < 40; sample += 1) {
+          if (await streamedEditor.isVisible()) streamedValues.add(await streamedEditor.inputValue());
+          await page.waitForTimeout(75);
+        }
+        if (streamedValues.size === 0) {
+          const history = await rpc<{ readonly events: readonly { readonly event: HistoryEvent }[] }>(origin, "session.history", { sessionId: storySession.sessionId, maxMessages: 1_000 });
+          throw new Error(`Agent write never reached the editor; tailEvents=${JSON.stringify(history.events.slice(-12).map((entry) => entry.event.type))}`);
+        }
+        const approval = page.getByRole("button", { name: /^(?:Allow once|允许一次)$/u });
+        try {
+          await approval.waitFor({ state: "visible", timeout: 3_000 });
+          await approval.click();
+        } catch { /* workspace writes may already be allowed by the active preset */ }
+        await page.getByText(agentMutationReply, { exact: true }).waitFor({ state: "visible", timeout: 20_000 });
+        await waitForCompletedTurn(origin, storySession.sessionId);
+        const agentFileUrl = `${origin}/oh-story/file?sessionId=${encodeURIComponent(storySession.sessionId)}&path=${encodeURIComponent(agentMutationPath)}`;
+        const agentFileResponse = await fetch(agentFileUrl);
+        const agentFile = await agentFileResponse.json() as { readonly content?: string };
+        if (!agentFileResponse.ok || agentFile.content !== agentMutationContent) {
+          throw new Error(`Real DSH Agent write was not authoritative on disk: ${JSON.stringify(agentFile)}`);
+        }
+        if (streamedValues.size < 2 || ![...streamedValues].some((value) => value.length > 0 && value.length < agentMutationContent.length)) {
+          throw new Error(`Editor did not expose incremental Agent write content: ${JSON.stringify([...streamedValues].map((value) => value.length))}`);
+        }
+        const agentTreeFile = page.locator(`button[data-file-path=${JSON.stringify(agentMutationPath)}]`);
+        await agentTreeFile.waitFor({ state: "visible", timeout: 10_000 });
+        if (await agentTreeFile.getAttribute("aria-current") !== "page") throw new Error("Agent write did not automatically select its file in the tree.");
+        await selectFile(page, chapterPath);
+        const agentFolder = page.locator(".oh-story-file-folder > summary").filter({ hasText: /^角色\d+$/u }).first();
+        await agentFolder.click();
+        await page.waitForFunction((path) => {
+          const button = document.querySelector(`button[data-file-path=${JSON.stringify(path)}]`);
+          return button === null || !button.checkVisibility();
+        }, agentMutationPath);
+        const officialWriteFile = page.locator('[data-slot="conversation.session"] button').filter({ hasText: new RegExp(`^${agentMutationPath}$`, "u") }).first();
+        await officialWriteFile.waitFor({ state: "visible", timeout: 10_000 });
+        await officialWriteFile.click();
+        await agentTreeFile.waitFor({ state: "visible", timeout: 10_000 });
+        if (await agentTreeFile.getAttribute("aria-current") !== "page") throw new Error("Official Chat tool file did not expand and locate the Agent-written file.");
+        await rm(join(storyRoot, agentMutationPath));
+        await page.getByTitle("刷新").click();
+        await agentTreeFile.waitFor({ state: "detached", timeout: 10_000 });
+      }
       await prepareDemoSurface(page);
       const previewTab = page.getByRole("tab", { name: "预览" });
       await previewTab.waitFor({ state: "visible", timeout: 10_000 });
@@ -422,8 +555,17 @@ async function main(): Promise<void> {
       await page.getByRole("tab", { name: "源码", exact: true }).click();
       const chapterEditor = page.getByRole("textbox", { name: chapterPath });
       await chapterEditor.waitFor({ state: "visible", timeout: 10_000 });
+      const draftChapter = `${chapter.content}\n<!-- session draft smoke -->\n`;
+      await chapterEditor.fill(draftChapter);
+      await selectSession(page, dramaWorkspace.workspace.title, dramaSessionTitle);
+      await selectSession(page, storyWorkspace.workspace.title, storySessionTitle);
+      const restoredDraft = page.getByRole("textbox", { name: chapterPath });
+      await restoredDraft.waitFor({ state: "visible", timeout: 10_000 });
+      if (await restoredDraft.inputValue() !== draftChapter) {
+        throw new Error("Switching DSH Sessions discarded the unsaved editor draft.");
+      }
       const editedChapter = `${chapter.content}\n<!-- native DSH editor smoke -->\n`;
-      await chapterEditor.fill(editedChapter);
+      await restoredDraft.fill(editedChapter);
       const saveButton = page.getByRole("button", { name: "保存", exact: true });
       const saveRequest = page.waitForResponse((response) => (
         response.request().method() === "PUT"
@@ -446,6 +588,44 @@ async function main(): Promise<void> {
         body: JSON.stringify({ content: chapter.content, baseVersion: savedChapter.version })
       });
       if (!restoredResponse.ok) throw new Error(`Could not restore the editor smoke fixture: ${String(restoredResponse.status)}.`);
+
+      await openGroup(page, "大纲");
+      await selectFile(page, "大纲/细纲_第001章.md");
+      await selectFile(page, chapterPath);
+      await page.getByRole("tab", { name: "源码", exact: true }).click();
+      const conflictEditor = page.getByRole("textbox", { name: chapterPath });
+      await conflictEditor.waitFor({ state: "visible", timeout: 10_000 });
+      if (await conflictEditor.inputValue() !== chapter.content) throw new Error("Editor did not reconcile the authoritative restored file.");
+      await conflictEditor.fill(`${chapter.content}\n<!-- local conflict draft -->\n`);
+      const conflictBaseResponse = await fetch(chapterUrl);
+      const conflictBase = await conflictBaseResponse.json() as { readonly content?: string; readonly version?: string };
+      if (!conflictBaseResponse.ok || conflictBase.content === undefined || conflictBase.version === undefined) throw new Error("Could not prepare browser conflict fixture.");
+      const externalChapter = `${chapter.content}\n<!-- external conflict edit -->\n`;
+      const externalResponse = await fetch(chapterUrl, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ content: externalChapter, baseVersion: conflictBase.version })
+      });
+      const external = await externalResponse.json() as { readonly version?: string };
+      if (!externalResponse.ok || external.version === undefined) throw new Error("Could not stage the external browser conflict.");
+      await page.getByTitle("刷新").click();
+      const conflictAlert = page.getByRole("alert").filter({ hasText: chapterPath });
+      await conflictAlert.waitFor({ state: "visible", timeout: 10_000 });
+      await selectFile(page, "大纲/细纲_第001章.md");
+      if (await page.getByRole("alert").count() !== 0) throw new Error("A file conflict leaked into a different editor tab.");
+      await selectFile(page, chapterPath);
+      await conflictAlert.waitFor({ state: "visible", timeout: 10_000 });
+      await page.getByRole("button", { name: "载入磁盘版本", exact: true }).click();
+      await page.getByRole("tab", { name: "源码", exact: true }).click();
+      if (await page.getByRole("textbox", { name: chapterPath }).inputValue() !== externalChapter) {
+        throw new Error("Conflict resolution did not load the authoritative disk version.");
+      }
+      const conflictRestore = await fetch(chapterUrl, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ content: chapter.content, baseVersion: external.version })
+      });
+      if (!conflictRestore.ok) throw new Error("Could not restore the browser conflict fixture.");
       await previewTab.click();
       await openGroup(page, "大纲");
       await selectFile(page, "大纲/细纲_第001章.md");
@@ -558,6 +738,25 @@ async function main(): Promise<void> {
         || narrowTree.width < 100 || narrowEditor.width < 200 || narrowChat.width < 240) {
         throw new Error(`Workbench overflowed the minimum DSH center width: ${JSON.stringify({ narrowViewportWidth, narrowScroller, narrowWorkbench, narrowTree, narrowEditor, narrowChat })}`);
       }
+      await page.setViewportSize({ width: 500, height: 900 });
+      await page.waitForTimeout(100);
+      const compactScroller = await scrollerLocator.evaluate((element) => ({ clientWidth: element.clientWidth, scrollWidth: element.scrollWidth }));
+      const compactBoxes = await Promise.all([
+        page.locator(".oh-story-tree").boundingBox(),
+        page.locator(".oh-story-editor").boundingBox(),
+        chatLocator.boundingBox(),
+        composerLocator.boundingBox(),
+        composerLocator.getByRole("button", { name: /^(?:Send message|发送消息)$/u }).boundingBox()
+      ]);
+      if (compactBoxes.some((box) => box === null)) throw new Error("Compact three-column layout lost a required column.");
+      const [compactTree, compactEditor, compactChat, compactComposer, compactSend] = compactBoxes as Exclude<(typeof compactBoxes)[number], null>[];
+      const compactOrdered = compactTree.x + compactTree.width <= compactEditor.x + 1
+        && compactEditor.x + compactEditor.width <= compactChat.x + 1;
+      const compactVisible = [compactTree, compactEditor, compactChat, compactComposer, compactSend]
+        .every((box) => box.x >= -1 && box.x + box.width <= 501);
+      if (!compactOrdered || !compactVisible) {
+        throw new Error(`500px viewport clipped the three-column workbench or Composer: ${JSON.stringify({ compactScroller, compactBoxes })}`);
+      }
       if (pageErrors.length > 0) throw new Error(`Browser module raised errors: ${pageErrors.join("; ")}`);
     } finally {
       await browser.close();
@@ -572,8 +771,11 @@ async function main(): Promise<void> {
       dramaSkills: dramaSkills.length,
       provider: useRealDeepSeek ? "deepseek-official" : "local-fixture",
       fixtures: [storyProjectName, dramaProjectName],
-      uiSlots: ["conversation.session.header.actions", "tool.call.toolview"],
-      threeColumn: true
+      uiSlots: ["shell.overlay", "tool.call.toolview"],
+      threeColumn: true,
+      agentWriteStreaming: !useRealDeepSeek,
+      atomicCasWriters: candidates.length,
+      compactViewport: 500
     })}\n`);
   } catch (error) {
     const apiKey = process.env.DEEPSEEK_API_KEY;

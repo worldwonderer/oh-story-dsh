@@ -8,7 +8,7 @@
   --os-border: var(--dsw-alias-border-l2);
   --os-muted: var(--dsw-alias-label-tertiary);
   display: grid;
-  grid-template-columns: clamp(108px, 16%, 190px) minmax(220px, 1fr) minmax(260px, 38%);
+  grid-template-columns: clamp(96px, 16%, 190px) minmax(180px, 1fr) minmax(252px, 38%);
   grid-template-rows: minmax(0, 1fr);
   min-height: 0;
   overflow-x: hidden;
@@ -307,7 +307,8 @@
 .oh-story-jsonl-error pre { margin: 3px -12px -12px; }
 
 .oh-story-stream,
-.oh-story-conflict {
+.oh-story-conflict,
+.oh-story-warning {
   flex: none;
   padding: 7px 12px;
   border-bottom: 1px solid var(--os-border);
@@ -318,6 +319,18 @@
 .oh-story-stream { color: var(--dsw-alias-state-business-primary); background: var(--dsw-alias-button-ghost-active-fill); }
 .oh-story-stream[data-stage="streaming"] { animation: oh-story-pulse 1.2s ease-in-out infinite alternate; }
 .oh-story-conflict { color: var(--dsw-alias-state-warn-label); background: var(--dsw-specific-tip); }
+.oh-story-conflict > div { display: flex; gap: 6px; margin-top: 6px; }
+.oh-story-conflict button,
+.oh-story-empty button {
+  border: 1px solid var(--os-border);
+  border-radius: 6px;
+  color: inherit;
+  background: var(--dsw-alias-bg-base);
+  padding: 3px 8px;
+  cursor: pointer;
+  font: inherit;
+}
+.oh-story-warning { color: var(--dsw-alias-state-warn-label); background: var(--dsw-specific-tip); }
 
 @keyframes oh-story-pulse { to { opacity: .62; } }
 @media (prefers-reduced-motion: reduce) { .oh-story-stream[data-stage="streaming"] { animation: none; } }
@@ -340,4 +353,20 @@
     grid-template-columns: 104px minmax(210px, 1fr) minmax(252px, 40%);
   }
   .oh-story-editor textarea { padding-right: 28px; padding-left: 28px; }
+}
+
+@media (max-width: 700px) {
+  [data-conversation-scroll]:has(> [data-slot="conversation.session"] > .oh-story-split-surface) {
+    grid-template-columns: 72px minmax(0, 1fr) 236px;
+  }
+  .oh-story-tree { padding-inline: 5px; }
+  .oh-story-brand { padding-inline: 3px; font-size: 11px; }
+  .oh-story-brand button { width: 24px; }
+  .oh-story-mode-tabs { margin-inline: 0; }
+  .oh-story-mode-tabs button { font-size: 10px; }
+  .oh-story-editor header { padding-inline: 7px; }
+  .oh-story-editor header > span { display: none; }
+  .oh-story-editor-tabs button { padding-inline: 6px; }
+  .oh-story-jsonl summary > code,
+  .oh-story-jsonl summary > em { display: none; }
 }

@@ -1,29 +1,35 @@
-import type { AssistantBlock, ClientContext, RunningToolCall } from "@deepseek-ai/dsh-client-runtime/client";
-import type { ConvViewProps } from "@deepseek-ai/dsh-client-ui-conversation/client";
+import type { ClientContext, ConversationSnapshot, ISessions, RunningToolCall } from "@deepseek-ai/dsh-client-runtime/client";
+import type {} from "@deepseek-ai/dsh-client-ui-layout/client";
 import type { ToolCallViewProps } from "@deepseek-ai/dsh-client-ui-tool/client";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import {
-  activeFileMutation,
   creativeRelativePath,
+  fileMutations,
+  mutatingCallIds,
   previewMutation,
   workbenchModeForPath,
-  type WorkbenchMode,
-  type FileMutationActivity
+  type WorkbenchMode
 } from "./file-activity.js";
 import { buildFileTree, type FileTreeNode } from "./file-tree.js";
 import { JsonlPreview } from "./jsonl-preview.js";
 import { MarkdownPreview } from "./markdown-preview.js";
 import styles from "./plugin.css?inline";
+import {
+  FILE_ACTIVITY_PROJECTION_KEY,
+  type FileActivityProjection,
+  type ProjectedFileCall
+} from "../file-activity-projection-types.js";
 
 export const name = "oh-story";
-export const inject = ["slots"];
+export const inject = ["sessions", "slots"];
 
-interface WorkspaceFile { readonly path: string; readonly bytes: number }
+interface WorkspaceFile { readonly path: string; readonly bytes: number; readonly version: string }
 interface WorkspacePayload {
   readonly cwd: string;
   readonly files: readonly WorkspaceFile[];
   readonly shortDrama: Record<string, unknown> | null;
+  readonly metadataErrors: readonly string[];
   readonly mode: "dsh-session";
 }
 interface FilePayload {
@@ -37,7 +43,44 @@ interface FileBuffer {
   readonly saved: string;
   readonly source: "disk" | "human" | "agent";
   readonly version: string;
+  readonly saving?: boolean | undefined;
+  readonly error?: string | undefined;
+  readonly missing?: boolean | undefined;
+  readonly conflict?: {
+    readonly message: string;
+    readonly theirs?: string | undefined;
+    readonly theirsVersion?: string | undefined;
+  } | undefined;
 }
+
+interface WorkbenchMemory {
+  readonly buffers: Record<string, FileBuffer>;
+  readonly editorMode: "preview" | "source";
+  readonly expanded: Record<string, boolean>;
+  readonly selected: string | undefined;
+  readonly workbench: WorkbenchMode;
+}
+
+interface ConversationSnapshotStore {
+  subscribe(listener: () => void): () => void;
+  getSnapshot(): ConversationSnapshot;
+}
+
+interface FileActivityProjectionStore {
+  subscribe(listener: () => void): () => void;
+  getSnapshot(): FileActivityProjection | undefined;
+}
+
+const EMPTY_FILE_ACTIVITY_STORE: FileActivityProjectionStore = {
+  subscribe: () => () => undefined,
+  getSnapshot: () => undefined
+};
+
+class WorkspaceRequestError extends Error {
+  constructor(readonly status: number, message: string) { super(message); }
+}
+
+const workbenchMemory = new Map<string, WorkbenchMemory>();
 
 const GROUP_ORDER: Readonly<Record<WorkbenchMode, readonly string[]>> = {
   story: ["正文", "大纲", "设定", "追踪", "对标", "参考资料"],
@@ -60,7 +103,6 @@ function preferredFile(files: readonly WorkspaceFile[], mode: WorkbenchMode): st
   return matching[0]?.path;
 }
 
-const EMPTY_BLOCKS: readonly AssistantBlock[] = [];
 const EMPTY_CALLS: readonly RunningToolCall[] = [];
 
 function endpoint(path: string, sessionId: string, file?: string): string {
@@ -72,7 +114,7 @@ function endpoint(path: string, sessionId: string, file?: string): string {
 
 async function json<T>(response: Response): Promise<T> {
   const value = await response.json() as T & { readonly error?: string };
-  if (!response.ok) throw new Error(value.error ?? `HTTP ${String(response.status)}`);
+  if (!response.ok) throw new WorkspaceRequestError(response.status, value.error ?? `HTTP ${String(response.status)}`);
   return value;
 }
 
@@ -103,7 +145,7 @@ function FileTreeNodes({
       aria-current={node.path === selected ? "page" : undefined}
       onClick={() => { onSelect(node.path); }}
     >{node.name}</button>;
-    const open = expanded[node.path] ?? selected?.startsWith(`${node.path}/`) === true;
+    const open = selected?.startsWith(`${node.path}/`) === true || expanded[node.path] === true;
     return <details className="oh-story-file-folder" key={node.path} open={open} onToggle={(event) => { onToggle(node.path, event.currentTarget.open); }}>
       <summary style={{ paddingLeft: `${String(7 + depth * 14)}px` }}>{node.name}<span>{node.fileCount}</span></summary>
       <FileTreeNodes
@@ -122,57 +164,104 @@ function FileTreeNodes({
 function useWorkspace(sessionId: string): {
   readonly workspace: WorkspacePayload | undefined;
   readonly error: string | undefined;
+  readonly loading: boolean;
   readonly reload: () => void;
 } {
   const [version, setVersion] = useState(0);
   const [workspace, setWorkspace] = useState<WorkspacePayload>();
   const [error, setError] = useState<string>();
+  const [loading, setLoading] = useState(true);
   const reload = useCallback(() => { setVersion((value) => value + 1); }, []);
   useEffect(() => {
     const controller = new AbortController();
     setError(undefined);
+    setLoading(true);
     void fetch(endpoint("workspace", sessionId), { signal: controller.signal })
       .then((response) => json<WorkspacePayload>(response))
       .then(setWorkspace)
       .catch((reason: unknown) => {
         if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : String(reason));
-      });
+      })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => { controller.abort(); };
   }, [sessionId, version]);
-  return { workspace, error, reload };
+  return { workspace, error, loading, reload };
 }
 
-function CreativeWorkbench({ sessionId, useSession }: Pick<ConvViewProps, "sessionId" | "useSession">) {
-  const { workspace, error, reload } = useWorkspace(sessionId);
-  const partialBlocks = useSession((value) => value.partial?.blocks ?? EMPTY_BLOCKS);
-  const runningCalls = useSession((value) => value.runningCalls ?? EMPTY_CALLS);
-  const activity = useMemo(() => activeFileMutation(partialBlocks, runningCalls), [partialBlocks, runningCalls]);
-  const activityPath = creativeRelativePath(activity?.path, workspace?.cwd);
-  const activityMode = workbenchModeForPath(activityPath);
-  const [workbench, setWorkbench] = useState<WorkbenchMode>("story");
+function CreativeWorkbench({
+  sessionId,
+  runningCalls,
+  projectedCalls
+}: {
+  readonly sessionId: string;
+  readonly runningCalls: readonly RunningToolCall[];
+  readonly projectedCalls: readonly ProjectedFileCall[];
+}) {
+  const { workspace, error, loading: workspaceLoading, reload } = useWorkspace(sessionId);
+  const activities = useMemo(
+    () => fileMutations(runningCalls, projectedCalls),
+    [projectedCalls, runningCalls]
+  );
+  const normalizedActivities = useMemo(() => activities.flatMap((activity) => {
+    const path = creativeRelativePath(activity.path, workspace?.cwd);
+    return path === undefined ? [] : [{ activity, path }];
+  }), [activities, workspace?.cwd]);
+  const primaryActivity = normalizedActivities.at(-1);
+  const activityPaths = useMemo(() => new Set(normalizedActivities.map((value) => value.path)), [normalizedActivities]);
+  const activity = primaryActivity?.activity;
+  const activityPath = primaryActivity?.path;
+  const remembered = useMemo(() => workbenchMemory.get(sessionId), [sessionId]);
+  const [workbench, setWorkbench] = useState<WorkbenchMode>(remembered?.workbench ?? "story");
   const initializedWorkbench = useRef(false);
-  const [selected, setSelected] = useState<string>();
-  const [buffers, setBuffers] = useState<Record<string, FileBuffer>>({});
+  const [selected, setSelected] = useState<string | undefined>(remembered?.selected);
+  const [buffers, setBuffers] = useState<Record<string, FileBuffer>>(remembered?.buffers ?? {});
   const buffersRef = useRef<Record<string, FileBuffer>>({});
-  const [refreshVersion, setRefreshVersion] = useState(0);
-  const [fileError, setFileError] = useState<string>();
-  const [conflict, setConflict] = useState<string>();
-  const [saving, setSaving] = useState(false);
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [expanded, setExpanded] = useState<Record<string, boolean>>(remembered?.expanded ?? {});
   const surfaceRef = useRef<HTMLDivElement>(null);
   const navRef = useRef<HTMLElement>(null);
-  const lastActivity = useRef<FileMutationActivity>();
-  const settleTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const activityBases = useRef(new Map<string, { readonly path: string; readonly base: string }>());
+  const previousSignals = useRef<ReadonlySet<string>>(new Set());
+  const saveLocks = useRef(new Set<string>());
   const buffer = selected === undefined ? undefined : buffers[selected];
   const dirty = buffer?.source === "human" && buffer.content !== buffer.saved;
+  const saving = buffer?.saving === true;
+  const fileError = buffer?.error;
+  const conflict = buffer?.conflict;
   const selectedLower = selected?.toLocaleLowerCase();
   const markdown = selectedLower?.endsWith(".md") === true;
   const jsonl = selectedLower?.endsWith(".jsonl") === true;
   const structured = jsonl || selectedLower?.endsWith(".json") === true;
   const previewable = markdown || jsonl;
-  const [editorMode, setEditorMode] = useState<"preview" | "source">("preview");
+  const [editorMode, setEditorMode] = useState<"preview" | "source">(remembered?.editorMode ?? "preview");
+  const modeSelection = useRef(selected);
 
   useEffect(() => { buffersRef.current = buffers; }, [buffers]);
+
+  useEffect(() => {
+    workbenchMemory.set(sessionId, { buffers, editorMode, expanded, selected, workbench });
+  }, [buffers, editorMode, expanded, selected, sessionId, workbench]);
+
+  useEffect(() => {
+    const warn = (event: BeforeUnloadEvent): void => {
+      if (!Object.values(buffersRef.current).some((value) => value.source === "human" && value.content !== value.saved)) return;
+      event.preventDefault();
+    };
+    globalThis.addEventListener("beforeunload", warn);
+    return () => { globalThis.removeEventListener("beforeunload", warn); };
+  }, []);
+
+  const revealPath = useCallback((path: string): void => {
+    setWorkbench(workbenchModeForPath(path) ?? "story");
+    setSelected(path);
+    const segments = path.split("/");
+    const ancestors = [groupForPath(path)];
+    for (let index = 1; index < segments.length - 1; index += 1) ancestors.push(segments.slice(0, index + 1).join("/"));
+    setExpanded((current) => {
+      const next = { ...current };
+      for (const ancestor of ancestors) next[ancestor] = true;
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     if (workspace === undefined || initializedWorkbench.current) return;
@@ -182,89 +271,144 @@ function CreativeWorkbench({ sessionId, useSession }: Pick<ConvViewProps, "sessi
   }, [workspace]);
 
   useEffect(() => {
-    if (activityMode !== undefined) setWorkbench(activityMode);
-  }, [activityMode]);
+    if (activityPath !== undefined) setEditorMode("source");
+  }, [activityPath]);
 
   useEffect(() => {
-    setEditorMode(previewable ? "preview" : "source");
-  }, [previewable, selected]);
+    if (modeSelection.current === selected) return;
+    modeSelection.current = selected;
+    setEditorMode(activityPath === selected ? "source" : previewable ? "preview" : "source");
+  }, [activityPath, previewable, selected]);
 
   useEffect(() => {
-    if (activityPath !== undefined) { setSelected(activityPath); return; }
+    if (workspaceLoading) return;
+    if (activityPath !== undefined) { revealPath(activityPath); return; }
     if (selected !== undefined && (
       (workspace?.files.some((file) => file.path === selected) ?? false)
       || buffers[selected] !== undefined
     ) && workbenchModeForPath(selected) === workbench) return;
     setSelected(workspace === undefined ? undefined : preferredFile(workspace.files, workbench));
-  }, [activityPath, buffers, selected, workbench, workspace]);
+  }, [activityPath, buffers, revealPath, selected, workbench, workspace, workspaceLoading]);
 
   useEffect(() => {
-    if (selected === undefined) return;
-    const exists = workspace?.files.some((file) => file.path === selected) ?? false;
-    if (activityPath === selected && !exists) return;
+    if (workspace === undefined || workspaceLoading) return;
+    const paths = new Set(workspace.files.map((file) => file.path));
+    setBuffers((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const [path, value] of Object.entries(current)) {
+        if (paths.has(path) || activityPaths.has(path)) continue;
+        if (value.source === "human" && value.content !== value.saved) {
+          if (value.missing !== true) {
+            next[path] = { ...value, missing: true, error: "文件已从 workspace 移除。本地草稿仍保留，可复制后放弃草稿。" };
+            changed = true;
+          }
+        } else {
+          delete next[path];
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [activityPaths, workspace, workspaceLoading]);
+
+  useEffect(() => {
+    if (selected === undefined || activityPaths.has(selected)) return;
+    if (!(workspace?.files.some((file) => file.path === selected) ?? false)) return;
     const controller = new AbortController();
-    setFileError(undefined);
+    setBuffers((current) => {
+      const existing = current[selected];
+      return existing === undefined ? current : { ...current, [selected]: { ...existing, error: undefined } };
+    });
     void fetch(endpoint("file", sessionId, selected), { signal: controller.signal })
       .then((response) => json<FilePayload>(response))
       .then((file) => {
-        const existing = buffersRef.current[file.path];
-        if (existing?.source === "human" && existing.content !== existing.saved) {
-          setConflict(`${file.path} 已被 Agent 更新；你的未保存版本仍保留。`);
-          return;
-        }
-        setBuffers((current) => ({
-          ...current,
-          [file.path]: { content: file.content, saved: file.content, source: "disk", version: file.version }
-        }));
+        setBuffers((current) => {
+          const existing = current[file.path];
+          if (existing?.source === "human" && existing.content !== existing.saved) {
+            if (existing.version === file.version) return { ...current, [file.path]: { ...existing, missing: false, error: undefined } };
+            return {
+              ...current,
+              [file.path]: {
+                ...existing,
+                missing: false,
+                error: undefined,
+                conflict: {
+                  message: `${file.path} 已在磁盘上更新；你的本地草稿没有被覆盖。`,
+                  theirs: file.content,
+                  theirsVersion: file.version
+                }
+              }
+            };
+          }
+          return {
+            ...current,
+            [file.path]: { content: file.content, saved: file.content, source: "disk", version: file.version }
+          };
+        });
       })
       .catch((reason: unknown) => {
-        if (!controller.signal.aborted) setFileError(reason instanceof Error ? reason.message : String(reason));
+        if (controller.signal.aborted) return;
+        setBuffers((current) => {
+          const existing = current[selected];
+          return existing === undefined ? current : {
+            ...current,
+            [selected]: { ...existing, error: reason instanceof Error ? reason.message : String(reason) }
+          };
+        });
       });
     return () => { controller.abort(); };
-  }, [activityPath, refreshVersion, selected, sessionId, workspace?.files]);
+  }, [activityPaths, selected, sessionId, workspace?.files]);
 
   useEffect(() => {
-    if (activity === undefined || activityPath === undefined) return;
-    setSelected(activityPath);
-    const existing = buffers[activityPath];
-    if (existing?.source === "human" && existing.content !== existing.saved) {
-      setConflict(`${activityPath} 正由 Agent 修改；你的未保存版本已锁定，不会被覆盖。`);
-      return;
-    }
-    const next = previewMutation(activity, existing?.saved ?? "");
-    if (next === undefined) return;
-    setConflict(undefined);
+    if (normalizedActivities.length === 0) return;
+    for (const { path } of normalizedActivities) revealPath(path);
     setBuffers((current) => {
-      const currentBuffer = current[activityPath];
-      if (currentBuffer?.source === "agent" && currentBuffer.content === next) return current;
-      return {
-        ...current,
-        [activityPath]: {
-          content: next,
-          saved: currentBuffer?.saved ?? "",
-          source: "agent",
-          version: currentBuffer?.version ?? ""
+      let next = current;
+      for (const { activity: currentActivity, path } of normalizedActivities) {
+        const existing = next[path];
+        if (existing?.source === "human" && existing.content !== existing.saved) {
+          next = {
+            ...next,
+            [path]: {
+              ...existing,
+              conflict: { message: `${path} 正由 Agent 修改；你的本地草稿已锁定，不会被覆盖。` }
+            }
+          };
+          continue;
         }
-      };
+        let basis = activityBases.current.get(currentActivity.callId);
+        if (basis === undefined || basis.path !== path) {
+          basis = { path, base: existing?.content ?? "" };
+          activityBases.current.set(currentActivity.callId, basis);
+        }
+        const preview = previewMutation(currentActivity, basis.base);
+        if (preview === undefined || (existing?.source === "agent" && existing.content === preview)) continue;
+        next = {
+          ...next,
+          [path]: {
+            content: preview,
+            saved: existing?.saved ?? "",
+            source: "agent",
+            version: existing?.version ?? ""
+          }
+        };
+      }
+      return next;
     });
-  }, [activity, activityPath, buffers]);
+  }, [normalizedActivities, revealPath]);
 
   useEffect(() => {
-    if (activity !== undefined) {
-      if (settleTimer.current !== undefined) clearTimeout(settleTimer.current);
-      lastActivity.current = activity;
-      return;
+    const signals = new Set(mutatingCallIds(runningCalls));
+    for (const { activity: currentActivity } of normalizedActivities) signals.add(currentActivity.callId.split(":", 1)[0] ?? currentActivity.callId);
+    const settled = [...previousSignals.current].some((callId) => !signals.has(callId));
+    for (const callId of activityBases.current.keys()) {
+      if (!signals.has(callId.split(":", 1)[0] ?? callId)) activityBases.current.delete(callId);
     }
-    if (lastActivity.current === undefined) return;
-    settleTimer.current = setTimeout(() => {
-      lastActivity.current = undefined;
-      reload();
-      setRefreshVersion((value) => value + 1);
-    }, 180);
-    return () => {
-      if (settleTimer.current !== undefined) clearTimeout(settleTimer.current);
-    };
-  }, [activity, reload]);
+    previousSignals.current = signals;
+    if (!settled) return;
+    reload();
+  }, [normalizedActivities, reload, runningCalls]);
 
   useEffect(() => {
     if (selected === undefined) return;
@@ -277,7 +421,7 @@ function CreativeWorkbench({ sessionId, useSession }: Pick<ConvViewProps, "sessi
   }, [selected]);
 
   useEffect(() => {
-    if (activity !== undefined || workspace === undefined) return;
+    if (normalizedActivities.length > 0 || workspace === undefined) return;
     const sessionSurface = surfaceRef.current?.parentElement;
     if (sessionSurface === undefined || sessionSurface === null) return;
     const knownPaths = new Set(workspace.files.map((file) => file.path));
@@ -288,58 +432,106 @@ function CreativeWorkbench({ sessionId, useSession }: Pick<ConvViewProps, "sessi
       if (control === null || control.closest(".oh-story-split-surface") !== null) return;
       const candidates = [control.title, control.getAttribute("aria-label"), control.textContent];
       for (const candidate of candidates) {
-        const path = creativeRelativePath(candidate?.trim().replace(/^Open\s+/u, ""), workspace.cwd);
+        const path = creativeRelativePath(candidate?.trim().replace(/^(?:Open|打开)\s+/u, ""), workspace.cwd);
         if (path === undefined || !knownPaths.has(path)) continue;
         event.preventDefault();
         event.stopPropagation();
-        setConflict(undefined);
-        setWorkbench(workbenchModeForPath(path) ?? "story");
-        setSelected(path);
+        revealPath(path);
         break;
       }
     };
     sessionSurface.addEventListener("click", followOfficialFileLink, true);
     return () => { sessionSurface.removeEventListener("click", followOfficialFileLink, true); };
-  }, [activity, workspace]);
+  }, [normalizedActivities.length, revealPath, workspace]);
 
-  const save = useCallback(async () => {
-    if (selected === undefined || buffer === undefined) return;
-    const submitted = buffer;
-    setSaving(true);
-    setFileError(undefined);
+  const savePath = useCallback(async (path: string) => {
+    if (saveLocks.current.has(path)) return;
+    const submitted = buffersRef.current[path];
+    if (submitted === undefined || submitted.missing === true || submitted.content === submitted.saved) return;
+    saveLocks.current.add(path);
+    setBuffers((current) => {
+      const existing = current[path];
+      return existing === undefined ? current : { ...current, [path]: { ...existing, saving: true, error: undefined } };
+    });
     try {
-      const file = await json<FilePayload>(await fetch(endpoint("file", sessionId, selected), {
+      const file = await json<FilePayload>(await fetch(endpoint("file", sessionId, path), {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ content: submitted.content, baseVersion: submitted.version })
       }));
       setBuffers((current) => {
-        const latest = current[selected];
+        const latest = current[path];
         if (latest === undefined) return current;
         const unchanged = latest.content === submitted.content;
         return {
           ...current,
-          [selected]: {
+          [path]: {
             content: unchanged ? file.content : latest.content,
             saved: file.content,
             source: unchanged ? "disk" : "human",
-            version: file.version
+            version: file.version,
+            saving: false
           }
         };
       });
-      setConflict(undefined);
       reload();
     } catch (reason) {
-      setFileError(reason instanceof Error ? reason.message : String(reason));
+      if (reason instanceof WorkspaceRequestError && reason.status === 412) {
+        try {
+          const theirs = await json<FilePayload>(await fetch(endpoint("file", sessionId, path)));
+          setBuffers((current) => {
+            const latest = current[path];
+            if (latest === undefined) return current;
+            return {
+              ...current,
+              [path]: {
+                ...latest,
+                saving: false,
+                conflict: {
+                  message: `${path} 已在磁盘上更新；请选择保留哪一版。`,
+                  theirs: theirs.content,
+                  theirsVersion: theirs.version
+                }
+              }
+            };
+          });
+        } catch (refreshError) {
+          setBuffers((current) => {
+            const existing = current[path];
+            return existing === undefined ? current : {
+              ...current,
+              [path]: { ...existing, saving: false, error: refreshError instanceof Error ? refreshError.message : String(refreshError) }
+            };
+          });
+        }
+      } else {
+        setBuffers((current) => {
+          const existing = current[path];
+          return existing === undefined ? current : {
+            ...current,
+            [path]: { ...existing, saving: false, error: reason instanceof Error ? reason.message : String(reason) }
+          };
+        });
+      }
     } finally {
-      setSaving(false);
+      saveLocks.current.delete(path);
     }
-  }, [buffer, reload, selected, sessionId]);
+  }, [reload, sessionId]);
+
+  useEffect(() => {
+    const saveShortcut = (event: KeyboardEvent): void => {
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLocaleLowerCase() !== "s") return;
+      event.preventDefault();
+      if (selected !== undefined) void savePath(selected);
+    };
+    globalThis.addEventListener("keydown", saveShortcut);
+    return () => { globalThis.removeEventListener("keydown", saveShortcut); };
+  }, [savePath, selected]);
 
   const groups = useMemo(() => {
     const value = new Map<string, WorkspaceFile[]>();
     const all = [...(workspace?.files ?? [])].filter((file) => workbenchModeForPath(file.path) === workbench);
-    if (activityPath !== undefined && !all.some((file) => file.path === activityPath)) all.push({ path: activityPath, bytes: 0 });
+    if (activityPath !== undefined && !all.some((file) => file.path === activityPath)) all.push({ path: activityPath, bytes: 0, version: "" });
     all.sort((left, right) => left.path.localeCompare(right.path, "zh-Hans-CN"));
     for (const file of all) {
       const directory = groupForPath(file.path);
@@ -358,13 +550,28 @@ function CreativeWorkbench({ sessionId, useSession }: Pick<ConvViewProps, "sessi
 
   const selectWorkbench = (next: WorkbenchMode): void => {
     setWorkbench(next);
-    setConflict(undefined);
     const target = workspace === undefined ? undefined : preferredFile(workspace.files, next);
-    setSelected(target);
+    if (target === undefined) setSelected(undefined);
+    else revealPath(target);
   };
   const selectedGroup = selected === undefined ? undefined : groupForPath(selected);
   const toggleGroup = (key: string, open: boolean): void => {
     setExpanded((current) => ({ ...current, [key]: open }));
+  };
+  const resolveConflict = (keepLocal: boolean): void => {
+    if (selected === undefined || conflict?.theirs === undefined || conflict.theirsVersion === undefined) return;
+    const theirs = conflict.theirs;
+    const theirsVersion = conflict.theirsVersion;
+    setBuffers((current) => {
+      const existing = current[selected];
+      if (existing === undefined) return current;
+      return {
+        ...current,
+        [selected]: keepLocal
+          ? { ...existing, saved: theirs, version: theirsVersion, source: "human", conflict: undefined }
+          : { content: theirs, saved: theirs, source: "disk", version: theirsVersion }
+      };
+    });
   };
 
   return <div ref={surfaceRef} className="oh-story-split-surface">
@@ -379,9 +586,10 @@ function CreativeWorkbench({ sessionId, useSession }: Pick<ConvViewProps, "sessi
         <button type="button" role="tab" aria-selected={workbench === "drama"} onClick={() => { selectWorkbench("drama"); }}>短剧</button>
       </div>
       {error !== undefined && <div className="oh-story-error">{error}</div>}
+      {workspace?.metadataErrors.map((message) => <div className="oh-story-warning" key={message}>{message}</div>)}
       <nav ref={navRef} aria-label={workbench === "story" ? "小说项目文件" : "短剧项目文件"}>
         {groups.map(([directory, files]) => {
-          const groupOpen = expanded[directory] ?? selectedGroup === directory;
+          const groupOpen = selectedGroup === directory || expanded[directory] === true;
           return <details className="oh-story-file-group" key={directory} open={groupOpen} onToggle={(event) => { toggleGroup(directory, event.currentTarget.open); }}>
             <summary>{directory}<span>{files.length}</span></summary>
             <FileTreeNodes
@@ -391,7 +599,7 @@ function CreativeWorkbench({ sessionId, useSession }: Pick<ConvViewProps, "sessi
               selected={selected}
               activityPath={activityPath}
               onToggle={toggleGroup}
-              onSelect={setSelected}
+              onSelect={revealPath}
             />
           </details>;
         })}
@@ -405,13 +613,19 @@ function CreativeWorkbench({ sessionId, useSession }: Pick<ConvViewProps, "sessi
             <button type="button" role="tab" aria-selected={editorMode === "preview"} onClick={() => { setEditorMode("preview"); }}>预览</button>
             <button type="button" role="tab" aria-selected={editorMode === "source"} onClick={() => { setEditorMode("source"); }}>源码</button>
           </div>}
-          {(dirty || saving) && <button className="oh-story-save" type="button" disabled={saving} onClick={() => { void save(); }}>
+          {(dirty || saving) && selected !== undefined && <button className="oh-story-save" type="button" disabled={saving || buffer?.missing === true} onClick={() => { void savePath(selected); }}>
             {saving ? "保存中…" : "保存"}
           </button>}
         </div>
       </header>
-      {activityPath === selected && <div className="oh-story-stream" data-stage={activity?.stage}>● {activity?.stage === "running" ? "Agent 正在应用修改" : "Agent 正在生成文件内容"}</div>}
-      {conflict !== undefined && <div className="oh-story-conflict">{conflict}</div>}
+      {activity !== undefined && activityPath !== undefined && activityPath === selected && <div className="oh-story-stream" data-stage={activity.stage} role="status" aria-live="polite">● {activity.stage === "running" ? "Agent 正在应用修改" : "Agent 正在生成文件内容"}</div>}
+      {conflict !== undefined && <div className="oh-story-conflict" role="alert">
+        <span>{conflict.message}</span>
+        {conflict.theirs !== undefined && conflict.theirsVersion !== undefined && selected !== undefined && <div>
+          <button type="button" onClick={() => { resolveConflict(false); }}>载入磁盘版本</button>
+          <button type="button" onClick={() => { resolveConflict(true); }}>保留本地草稿</button>
+        </div>}
+      </div>}
       {fileError !== undefined && <div className="oh-story-error">{fileError}</div>}
       {selected === undefined
         ? <div className="oh-story-empty">{workbench === "story"
@@ -419,6 +633,15 @@ function CreativeWorkbench({ sessionId, useSession }: Pick<ConvViewProps, "sessi
             : <>当前 workspace 还没有短剧项目。可在右侧 Chat 中运行 <code>/short-drama</code>。</>}</div>
         : buffer === undefined
           ? <div className="oh-story-empty">正在加载 {selected}…</div>
+        : buffer.missing === true
+          ? <div className="oh-story-empty">文件已从 workspace 移除，本地草稿仍保留。请先复制需要的内容，再放弃草稿。<button type="button" onClick={() => {
+            setBuffers((current) => {
+              const next = { ...current };
+              delete next[selected];
+              return next;
+            });
+            setSelected(workspace === undefined ? undefined : preferredFile(workspace.files, workbench));
+          }}>放弃本地草稿</button></div>
         : previewable && editorMode === "preview"
           ? markdown
             ? <MarkdownPreview content={buffer.content} label={selected} />
@@ -434,15 +657,11 @@ function CreativeWorkbench({ sessionId, useSession }: Pick<ConvViewProps, "sessi
                   content,
                   saved: current[selected]?.saved ?? "",
                   source: "human",
-                  version: current[selected]?.version ?? ""
+                  version: current[selected]?.version ?? "",
+                  conflict: current[selected]?.conflict,
+                  saving: current[selected]?.saving
                 }
               }));
-            }}
-            onKeyDown={(event) => {
-              if ((event.metaKey || event.ctrlKey) && event.key.toLocaleLowerCase() === "s") {
-                event.preventDefault();
-                void save();
-              }
             }}
             spellCheck={!structured}
             aria-label={selected}
@@ -451,20 +670,39 @@ function CreativeWorkbench({ sessionId, useSession }: Pick<ConvViewProps, "sessi
   </div>;
 }
 
-/**
- * DSH's stable data-slot anchor is the supported addressable styling seam.
- * Portal the story surface beside the still-mounted official active view;
- * Chat, its child slots, store, composer, Todo, approvals, and scroll logic
- * remain owned by the official conversation plugin.
- */
-function CreativeSplitBridge(props: Pick<ConvViewProps, "sessionId" | "useSession">) {
+/** Mount beside the official conversation without replacing Chat or Composer. */
+function CreativeSplitBridge({ context }: { readonly context: ClientContext }) {
   const marker = useRef<HTMLSpanElement>(null);
   const [target, setTarget] = useState<HTMLElement>();
+  const sessions = context.sessions as unknown as ISessions;
+  const provideFace = sessions.currentProvideInfo;
+  const subscribeProvide = useCallback((listener: () => void) => provideFace.subscribe(listener), [provideFace]);
+  const getProvide = useCallback(() => provideFace.getSnapshot(), [provideFace]);
+  const provide = useSyncExternalStore(subscribeProvide, getProvide, getProvide);
+  const sessionId = provide.sessionId;
+  const source = provide.hooks.session as ConversationSnapshotStore | undefined;
+  const subscribe = useCallback((listener: () => void) => source?.subscribe(listener) ?? (() => undefined), [source]);
+  const getSnapshot = useCallback(() => source?.getSnapshot(), [source]);
+  const snapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  const projectionSource = useMemo(
+    () => (provide.projections?.faceOf(FILE_ACTIVITY_PROJECTION_KEY) as FileActivityProjectionStore | undefined) ?? EMPTY_FILE_ACTIVITY_STORE,
+    [provide.projections]
+  );
+  const subscribeProjection = useCallback((listener: () => void) => projectionSource.subscribe(listener), [projectionSource]);
+  const getProjection = useCallback(() => projectionSource.getSnapshot(), [projectionSource]);
+  const projection = useSyncExternalStore(subscribeProjection, getProjection, getProjection);
   useLayoutEffect(() => {
-    const root = marker.current?.closest<HTMLElement>("[data-phase]");
-    const anchor = root?.querySelector<HTMLElement>("[data-conversation-scroll] > [data-slot='conversation.session']");
-    setTarget(anchor ?? undefined);
-  }, [props.sessionId]);
+    const document = marker.current?.ownerDocument;
+    if (document === undefined) return;
+    const locate = (): void => {
+      const anchor = document.querySelector<HTMLElement>("[data-conversation-scroll] > [data-slot='conversation.session']");
+      setTarget((current) => current === anchor ? current : anchor ?? undefined);
+    };
+    locate();
+    const observer = new MutationObserver(locate);
+    observer.observe(document.body, { childList: true, subtree: true });
+    return () => { observer.disconnect(); };
+  }, [sessionId]);
   useLayoutEffect(() => {
     const scroller = target?.parentElement;
     if (scroller === undefined || scroller === null) return;
@@ -481,7 +719,12 @@ function CreativeSplitBridge(props: Pick<ConvViewProps, "sessionId" | "useSessio
   }, [target]);
   return <>
     <span ref={marker} className="oh-story-bridge-marker" aria-hidden />
-    {target === undefined ? null : createPortal(<CreativeWorkbench key={props.sessionId} {...props} />, target)}
+    {target === undefined || sessionId === undefined ? null : createPortal(<CreativeWorkbench
+      key={sessionId}
+      sessionId={sessionId}
+      runningCalls={snapshot?.runningCalls ?? EMPTY_CALLS}
+      projectedCalls={projection?.calls ?? []}
+    />, target)}
   </>;
 }
 
@@ -513,11 +756,11 @@ function RoleToolView({ block, inspect }: ToolCallViewProps) {
 
 /** Register only official DSH surfaces; the split bridge never replaces Chat. */
 export function apply(context: ClientContext): void {
-  context.slots.inject("conversation.session.header.actions", () => context.slots.register({
-    name: "conversation.session.header.actions",
+  context.slots.inject("shell.overlay", () => context.slots.register({
+    name: "shell.overlay",
     id: "oh-story-workspace",
     order: -100
-  }, CreativeSplitBridge));
+  }, () => <CreativeSplitBridge context={context} />));
   context.slots.inject("tool.call.toolview", () => context.slots.register({
     name: "tool.call.toolview",
     key: "oh_story_role"
