@@ -425,7 +425,15 @@ async function main(): Promise<void> {
       const editedChapter = `${chapter.content}\n<!-- native DSH editor smoke -->\n`;
       await chapterEditor.fill(editedChapter);
       const saveButton = page.getByRole("button", { name: "保存", exact: true });
+      const saveRequest = page.waitForResponse((response) => (
+        response.request().method() === "PUT"
+        && response.url() === chapterUrl
+      ));
       await saveButton.click();
+      const browserSaveResponse = await saveRequest;
+      if (!browserSaveResponse.ok()) {
+        throw new Error(`Browser editor save returned HTTP ${String(browserSaveResponse.status())}.`);
+      }
       await saveButton.waitFor({ state: "hidden", timeout: 10_000 });
       const savedResponse = await fetch(chapterUrl);
       const savedChapter = await savedResponse.json() as { readonly content?: string; readonly version?: string };

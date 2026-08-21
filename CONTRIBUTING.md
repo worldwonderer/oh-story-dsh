@@ -50,7 +50,7 @@ pnpm assets:check
 - `CI / Portability`：macOS 与 Windows 执行类型、资产、单测与构建，锁定跨平台路径行为。
 - `CI / Packaged DSH Web integration`：构建 tarball、安装到官方 DSH Web，并用 Chrome 验证能力目录、工作区安全与三栏 UI。
 - `Real Provider`：手动工作流；仅在仓库配置 `DEEPSEEK_API_KEY` Secret 时运行付费真实模型链路。
-- `Release Candidate`：Tag 或手动触发，执行完整发布门禁并上传 `.tgz` 构建产物；不会自动发布 npm。
+- `Release`：Tag 或手动触发发布门禁；`v*` Tag 会把同一份 `.tgz` 发布到 GitHub Release 与 npm。
 
 ## 发布检查
 
@@ -58,6 +58,7 @@ pnpm assets:check
 2. 运行 `pnpm verify:release`。
 3. 运行 `pnpm test:dsh:real` 并确认项目摘要未改变、凭据未出现在日志中。
 4. 运行 `DEEPSEEK_API_KEY=... pnpm demo`，通过真实 DeepSeek 会话一次性重新生成并检查两张 README 演示图。
-5. 运行 `pnpm pack:release`，检查 tarball 后再执行外部发布。
+5. 运行 `pnpm pack:release` 并检查 tarball。
+6. 按 [`docs/RELEASING.md`](docs/RELEASING.md) 创建与包版本一致的 Tag，由工作流执行正式发布。
 
 架构约束见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)，验证覆盖见 [`docs/VALIDATION.md`](docs/VALIDATION.md)。

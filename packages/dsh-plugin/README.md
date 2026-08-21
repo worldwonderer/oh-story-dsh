@@ -22,6 +22,13 @@ npx -y @deepseek-ai/dsh@0.1.1-rc.1 plugin --profile web add @oh-story/dsh@0.1.0
 npx -y @deepseek-ai/dsh@0.1.1-rc.1 web
 ```
 
+也可以直接安装 GitHub Release 中的预构建包：
+
+```bash
+npx -y @deepseek-ai/dsh@0.1.1-rc.1 plugin --profile web add https://github.com/worldwonderer/oh-story-dsh/releases/download/v0.1.0/oh-story-dsh-0.1.0.tgz
+npx -y @deepseek-ai/dsh@0.1.1-rc.1 web
+```
+
 需要 Node.js 24+。首次使用需要在 DSH 的「设置 → 模型」中添加 Provider 并填入 API Key，或在启动前设置环境变量 `DEEPSEEK_API_KEY`。
 
 将作品目录添加为 DSH workspace，然后在普通 Agent 会话中使用 `/story` 或 `/short-drama`。模型、凭据、Preset、权限、会话记录、停止/继续、Todo、审批和 Composer 均使用当前 DeepSeek Harness 配置与界面。

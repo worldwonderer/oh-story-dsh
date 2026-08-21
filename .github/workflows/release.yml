@@ -1,4 +1,4 @@
-name: Release Candidate
+name: Release
 
 on:
   push:
@@ -10,11 +10,12 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write
+  id-token: write
 
 jobs:
-  package:
-    name: Verify and pack
+  release:
+    name: Verify, package and publish
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -31,8 +32,46 @@ jobs:
         run: pnpm exec playwright install --with-deps chrome
       - run: pnpm verify:release
       - run: pnpm pack:release
+      - name: Verify tag matches package version
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          PACKAGE_VERSION="$(node -p "require('./packages/dsh-plugin/package.json').version")"
+          test "$RELEASE_TAG" = "v$PACKAGE_VERSION" || {
+            echo "Tag $RELEASE_TAG does not match @oh-story/dsh@$PACKAGE_VERSION" >&2
+            exit 1
+          }
+      - name: Generate checksums
+        run: cd release && sha256sum *.tgz > SHA256SUMS
       - uses: actions/upload-artifact@v7
         with:
           name: oh-story-dsh-${{ github.ref_name }}
-          path: release/*.tgz
+          path: |
+            release/*.tgz
+            release/SHA256SUMS
           if-no-files-found: error
+      - name: Create or update GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" release/*.tgz release/SHA256SUMS --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" release/*.tgz release/SHA256SUMS \
+              --verify-tag \
+              --generate-notes \
+              --title "oh-story-dsh $GITHUB_REF_NAME"
+          fi
+      - name: Publish npm package
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          PACKAGE_VERSION="$(node -p "require('./packages/dsh-plugin/package.json').version")"
+          if npm view "@oh-story/dsh@$PACKAGE_VERSION" version >/dev/null 2>&1; then
+            echo "@oh-story/dsh@$PACKAGE_VERSION is already published"
+          else
+            npm publish "./release/oh-story-dsh-$PACKAGE_VERSION.tgz" --access public --provenance
+          fi

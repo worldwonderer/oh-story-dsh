@@ -22,7 +22,8 @@
     "directory": "packages/dsh-plugin"
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "provenance": true
   },
   "engines": {
     "node": ">=24.0.0"
@@ -62,6 +63,7 @@
   ],
   "scripts": {
     "build": "tsx ../../scripts/build-dsh-plugin.ts && tsc -p tsconfig.build.json",
+    "prepack": "pnpm build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },

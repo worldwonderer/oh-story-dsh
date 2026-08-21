@@ -51,6 +51,13 @@ npx -y @deepseek-ai/dsh@0.1.1-rc.1 plugin --profile web add @oh-story/dsh@0.1.0
 npx -y @deepseek-ai/dsh@0.1.1-rc.1 web
 ```
 
+也可以直接安装 GitHub Release 中经过同一套测试的预构建包：
+
+```bash
+npx -y @deepseek-ai/dsh@0.1.1-rc.1 plugin --profile web add https://github.com/worldwonderer/oh-story-dsh/releases/download/v0.1.0/oh-story-dsh-0.1.0.tgz
+npx -y @deepseek-ai/dsh@0.1.1-rc.1 web
+```
+
 默认在 `http://127.0.0.1:3080` 打开。
 
 **2. 配置模型**
