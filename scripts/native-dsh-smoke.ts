@@ -23,6 +23,8 @@ const agentMutationPrompt = "AGENT_WRITE_SMOKE：请使用 write 工具创建指
 const agentMutationPath = "设定/角色/_agent-write-smoke.md";
 const agentMutationContent = "# Agent 写入验证\n\n这段正文由真实 DSH Agent 工具调用流式写入。\n\n- 文件树自动定位\n- 编辑器同步更新\n";
 const agentMutationReply = "测试文件已通过 write 工具创建。";
+const todoLayoutPrompt = "TODO_LAYOUT_SMOKE：写入十一条已完成任务。";
+const todoLayoutItems = Array.from({ length: 11 }, (_, index) => ({ content: `布局任务 ${String(index + 1)}`, status: "completed" }));
 
 async function captureDemoFrame(page: Page, workbench: "story" | "drama", index: number): Promise<void> {
   if (demoFramesDirectory === undefined) return;
@@ -82,17 +84,21 @@ async function startMockDeepSeek(): Promise<MockDeepSeek> {
       const lastUserIndex = messages.findLastIndex((message) => message.role === "user");
       const currentTurn = JSON.stringify(messages.slice(Math.max(lastUserIndex, 0)));
       const mutationTurn = currentTurn.includes(agentMutationPrompt);
+      const todoLayoutTurn = currentTurn.includes(todoLayoutPrompt);
       const hasToolResult = messages.slice(lastUserIndex + 1).some((message) => message.role === "tool");
       let events: string[];
-      if (mutationTurn && !hasToolResult) {
-        const argumentsJson = JSON.stringify({ file_path: agentMutationPath, content: agentMutationContent });
+      if ((mutationTurn || todoLayoutTurn) && !hasToolResult) {
+        const tool = todoLayoutTurn
+          ? { id: "call_todo_layout", name: "todo_write", args: { todos: todoLayoutItems } }
+          : { id: "call_oh_story_write_smoke", name: "write", args: { file_path: agentMutationPath, content: agentMutationContent } };
+        const argumentsJson = JSON.stringify(tool.args);
         const chunks = argumentsJson.match(/.{1,14}/gu) ?? [argumentsJson];
         events = [
           JSON.stringify({ choices: [{ delta: { role: "assistant", content: null, reasoning_content: "" } }] }),
           ...chunks.map((argumentsDelta, index) => JSON.stringify({ choices: [{ delta: { tool_calls: [{
             index: 0,
-            ...(index === 0 ? { id: "call_oh_story_write_smoke", type: "function" } : {}),
-            function: { ...(index === 0 ? { name: "write" } : {}), arguments: argumentsDelta }
+            ...(index === 0 ? { id: tool.id, type: "function" } : {}),
+            function: { ...(index === 0 ? { name: tool.name } : {}), arguments: argumentsDelta }
           }] } }] })),
           JSON.stringify({ choices: [{ delta: { content: "" }, finish_reason: "tool_calls" }], usage: { prompt_tokens: 12, completion_tokens: 20 } }),
           "[DONE]"
@@ -115,7 +121,7 @@ async function startMockDeepSeek(): Promise<MockDeepSeek> {
       response.socket?.setNoDelay(true);
       for (const event of events) {
         response.write(`data: ${event}\n\n`);
-        if (mutationTurn && !hasToolResult) await new Promise((accept) => setTimeout(accept, 180));
+        if (todoLayoutTurn || (mutationTurn && !hasToolResult)) await new Promise((accept) => setTimeout(accept, todoLayoutTurn ? 500 : 180));
       }
       response.end();
     });
@@ -483,6 +489,8 @@ async function main(): Promise<void> {
       const blankSession = page.getByRole("button", { name: /^(?:New session|新会话)$/u }).first();
       await blankSession.waitFor({ state: "visible", timeout: 10_000 });
       await blankSession.click();
+      await page.getByRole("treeitem", { selected: true }).filter({ hasText: /^(?:New Session|新会话)$/u })
+        .waitFor({ state: "visible", timeout: 10_000 });
       await page.getByRole("navigation", { name: "小说项目文件" }).waitFor({ state: "visible", timeout: 20_000 });
       if (await page.locator(".oh-story-split-surface").count() !== 1) {
         throw new Error("Blank DSH Session did not mount the three-column workbench.");
@@ -761,6 +769,25 @@ async function main(): Promise<void> {
       await page.getByText(dramaPrompt, { exact: true }).waitFor({ state: "visible", timeout: 20_000 });
       if (!useRealDeepSeek) await page.getByText(dramaReply, { exact: true }).waitFor({ state: "visible", timeout: 10_000 });
       if (await page.getByText("This turn failed", { exact: false }).isVisible()) throw new Error("Drama Chat contains a failed turn.");
+      if (!useRealDeepSeek) {
+        const scroller = page.locator("[data-conversation-scroll]");
+        await scroller.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+        await rpc(origin, "session.prompt", { sessionId: dramaSession.sessionId, mode: "queue", content: [{ type: "text", text: todoLayoutPrompt }] });
+        const todo = page.locator('[data-testid="todo-panel"]');
+        await todo.waitFor({ state: "visible", timeout: 30_000 });
+        await todo.getByRole("button").click();
+        await todo.locator("li").last().waitFor({ state: "attached", timeout: 20_000 });
+        const flow = page.locator('[data-slot="conversation.session"] [data-chat-flow]');
+        const tail = flow.locator(":scope > *").last();
+        const [tailBox, seatBox, scrollBox, clearance, tailFlowKey] = await Promise.all([
+          tail.boundingBox(), page.locator("[data-composer-seat]").boundingBox(), scroller.boundingBox(),
+          flow.evaluate((element) => Number.parseFloat(getComputedStyle(element).paddingBottom)), tail.getAttribute("data-chat-flow-key")
+        ]);
+        if (tailBox === null || seatBox === null || scrollBox === null || tailFlowKey !== null
+          || tailBox.y < scrollBox.y - 1 || tailBox.y + tailBox.height > seatBox.y + 1 || clearance < seatBox.height + 15) {
+          throw new Error(`Streaming Todo obscured Chat: ${JSON.stringify({ tailBox, seatBox, scrollBox, clearance, tailFlowKey })}`);
+        }
+      }
       await prepareDemoSurface(page);
       await selectFile(page, "剧集/EP001/screenplay.md");
       await page.getByRole("article", { name: "剧集/EP001/screenplay.md 渲染预览" }).waitFor({ state: "visible", timeout: 10_000 });

@@ -17,6 +17,7 @@
   scrollbar-gutter: stable;
 }
 
+/* Keep the final Chat flow above the overlapping official Composer. */
 [data-conversation-scroll]:has(> [data-slot="conversation.session"] > .oh-story-split-surface)
   > [data-slot="conversation.session"] > :not(.oh-story-split-surface) {
   grid-column: 3;
@@ -24,6 +25,11 @@
   min-width: 0;
   min-height: 100%;
   border-left: 1px solid var(--os-border);
+}
+
+[data-conversation-scroll]:has(> [data-slot="conversation.session"] > .oh-story-split-surface)
+  [data-chat-flow] {
+  padding-bottom: calc(var(--dsh-composer-height, 152px) + 16px);
 }
 
 [data-conversation-scroll]:has(> [data-slot="conversation.session"] > .oh-story-split-surface)
